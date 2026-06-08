@@ -1,21 +1,22 @@
 // ES8311 codec "ping" generator. See audio.h for the core/bus discipline.
 //
-// The ES8311 register init below is the canonical DAC-playback sequence (MCLK from
-// the I2S MCLK pin). If the speaker stays silent on hardware, cross-check the values
-// against the Waveshare 08_ES8311 Arduino demo — only this table is board-specific;
-// the triggers, volume and task wiring are independent of it.
+// Uses the IDF I2S driver directly (the Arduino ESP_I2S wrapper hit an IRAM-safe
+// GDMA/interrupt mismatch in the precompiled libs: "Register tx callback failed").
+// The ES8311 register init below is the canonical DAC-playback sequence; if the
+// speaker stays silent, cross-check it against the Waveshare 08_ES8311 demo — only
+// that table is board-specific, the rest is independent.
 #include "audio.h"
 #include "config.h"
 #include <Arduino.h>
 #include <Wire.h>
-#include <ESP_I2S.h>
+#include "driver/i2s.h"
 #include <math.h>
 
 #define ES8311_ADDR   0x18
 #define SR            16000          // playback sample rate (a beep; pitch-tolerant)
+#define I2S_PORT      I2S_NUM_0
 
-static I2SClass s_i2s;
-static bool     s_ok = false;
+static bool s_ok = false;
 static volatile int  s_vol = 60;     // 0..100
 static volatile bool s_muted = false;
 static volatile int  s_cue = -1;
@@ -46,6 +47,34 @@ static void es8311_init() {
     for (auto &r : seq) { es_write(r[0], r[1]); delay(1); }
 }
 
+static bool i2s_setup() {
+    i2s_config_t cfg = {};
+    cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
+    cfg.sample_rate = SR;
+    cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
+    cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;       // stereo
+    cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
+    cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
+    cfg.dma_buf_count = 6;
+    cfg.dma_buf_len = 256;
+    cfg.use_apll = false;
+    cfg.tx_desc_auto_clear = true;
+    cfg.fixed_mclk = 0;
+    cfg.mclk_multiple = I2S_MCLK_MULTIPLE_256;
+    cfg.bits_per_chan = I2S_BITS_PER_CHAN_16BIT;
+    if (i2s_driver_install(I2S_PORT, &cfg, 0, nullptr) != ESP_OK) return false;
+
+    i2s_pin_config_t pins = {};
+    pins.mck_io_num   = PIN_I2S_MCLK;
+    pins.bck_io_num   = PIN_I2S_BCLK;
+    pins.ws_io_num    = PIN_I2S_LRCLK;
+    pins.data_out_num = PIN_I2S_DOUT;
+    pins.data_in_num  = I2S_PIN_NO_CHANGE;
+    if (i2s_set_pin(I2S_PORT, &pins) != ESP_OK) { i2s_driver_uninstall(I2S_PORT); return false; }
+    i2s_zero_dma_buffer(I2S_PORT);
+    return true;
+}
+
 // Synthesize one beep (freq Hz, ms) with a short fade in/out, into a stereo buffer.
 static size_t gen_beep(int16_t *buf, size_t cap, float freq, int ms, float amp) {
     const size_t n = (size_t)((long)SR * ms / 1000);
@@ -67,26 +96,25 @@ static void play_cue(int cue) {
     const float amp = (s_vol / 100.0f) * 17000.0f;
     digitalWrite(PIN_AUDIO_PA, HIGH);              // enable speaker amp
     delay(2);
+    size_t bw;
     if (cue == AUDIO_ALERT) {
         for (int k = 0; k < 2; ++k) {
             size_t ns = gen_beep(buf, sizeof(buf) / 2, 1320.0f, 80, amp);
-            s_i2s.write((uint8_t *)buf, ns * 2);
+            i2s_write(I2S_PORT, buf, ns * 2, &bw, portMAX_DELAY);
             delay(40);
         }
     } else {
         size_t ns = gen_beep(buf, sizeof(buf) / 2, 880.0f, 110, amp * 0.8f);
-        s_i2s.write((uint8_t *)buf, ns * 2);
+        i2s_write(I2S_PORT, buf, ns * 2, &bw, portMAX_DELAY);
     }
+    i2s_zero_dma_buffer(I2S_PORT);
     delay(6);
     digitalWrite(PIN_AUDIO_PA, LOW);               // mute amp between pings (saves power, kills hiss)
 }
 
 static void audio_task(void *) {
     for (;;) {
-        if (xSemaphoreTake(s_sem, portMAX_DELAY) == pdTRUE) {
-            const int cue = s_cue;
-            play_cue(cue);
-        }
+        if (xSemaphoreTake(s_sem, portMAX_DELAY) == pdTRUE) play_cue(s_cue);
     }
 }
 
@@ -102,9 +130,8 @@ bool audio_begin() {
     }
     es8311_init();
 
-    s_i2s.setPins(PIN_I2S_BCLK, PIN_I2S_LRCLK, PIN_I2S_DOUT, -1, PIN_I2S_MCLK);
-    if (!s_i2s.begin(I2S_MODE_STD, SR, I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO)) {
-        Serial.println("[audio] I2S begin failed");
+    if (!i2s_setup()) {
+        Serial.println("[audio] I2S init failed");
         s_ok = false;
         return false;
     }
