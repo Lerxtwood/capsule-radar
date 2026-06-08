@@ -28,9 +28,6 @@ static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
 #define LCD_ROW_OFFSET      0              // no row (y) gap
 #define LCD_QSPI_HZ         80000000       // CO5300 QSPI clock (vendor uses 40 MHz; 80 = faster, verify no artifacts)
 #define BRIGHTNESS_DEFAULT  200            // 0..255, panel brightness via cmd 0x51
-#define BRIGHTNESS_NIGHT    35             // dimmed brightness during night hours
-#define NIGHT_START_HOUR    22             // auto-dim from this hour...
-#define NIGHT_END_HOUR      7              // ...until this hour (local time)
 #define TZ_STR              "CET-1CEST,M3.5.0,M10.5.0/3"  // POSIX TZ (Spain) for local time/date
 #define BRIGHTNESS_IDLE     25             // dimmed after no touch for IDLE_DIM_MS
 #define IDLE_DIM_MS         20000          // dim the screen after this long without a touch

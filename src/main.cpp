@@ -20,7 +20,7 @@
 #include <string>
 #include <WiFiManager.h>             // captive portal
 #include <Preferences.h>            // NVS (persist theme/settings)
-#include <time.h>                   // NTP clock + night auto-dim
+#include <time.h>                   // NTP/RTC clock + date
 #include <WebServer.h>              // configuration web page
 #include <ESPmDNS.h>                // http://capsuleradar.local
 #include <ArduinoOTA.h>             // OTA firmware update over WiFi
@@ -188,14 +188,12 @@ static void rtc_seed_clock() {
     Serial.println("[rtc] system clock seeded from RTC");
 }
 
-// Brightness combines night auto-dim and face-down sleep (sleep wins -> screen off).
-static bool g_night  = false;
+// Brightness combines idle auto-dim and face-down sleep (sleep wins -> screen off).
 static bool g_asleep = false;   // face-down
 static bool g_idle   = false;   // no touch for a while
 static void applyBrightness() {
     int b = g_brightnessDay;
-    if (g_night && BRIGHTNESS_NIGHT < b) b = BRIGHTNESS_NIGHT;   // night/idle only dim down
-    if (g_idle  && BRIGHTNESS_IDLE  < b) b = BRIGHTNESS_IDLE;
+    if (g_idle  && BRIGHTNESS_IDLE  < b) b = BRIGHTNESS_IDLE;   // idle only dims down
     if (g_asleep) b = 0;                                         // face-down -> screen off
     display::setBrightness(b);
 }
@@ -492,7 +490,7 @@ void loop() {
         }
     }
 
-    // periodic: HUD clock + wifi indicator, and night auto-dim
+    // periodic: HUD clock + wifi/battery indicators
     static uint32_t lastStatus = 0;
     if (millis() - lastStatus > 5000) {
         lastStatus = millis();
@@ -515,10 +513,6 @@ void loop() {
         const bool bpresent = battery_present();
         ui_set_battery(battery_percent(), battery_charging(), bpresent);
         g_onBattery = bpresent && !battery_charging();
-        if (haveTime) {
-            const bool night = (ti.tm_hour >= NIGHT_START_HOUR || ti.tm_hour < NIGHT_END_HOUR);
-            if (night != g_night) { g_night = night; applyBrightness(); }
-        }
         // once NTP has a real fix, persist it to the RTC (core 1 only)
         if (!g_rtcSynced && time(nullptr) > 1700000000L) {
             time_t now = time(nullptr);

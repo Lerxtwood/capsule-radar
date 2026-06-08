@@ -86,7 +86,7 @@ First make the Waveshare `01_HelloWorld` equivalent light up, then bring this sc
 - **M1 — Static scope**: draw rings, crosshair, N/E/S/W, center dot, animated sweep. Match the mockup palette on true-black AMOLED.
 - **M2 — Live data**: WiFi + captive portal; `adsb_client` fetch/parse; project aircraft to screen; glyphs rotated by `track`; altitude color map; fading trails.
 - **M3 — Touch & detail**: hit-test nearest glyph on tap → detail card (callsign, type, alt, gs, vs, dist, bearing, squawk). Swipeable views: radar / list / stats.
-- **M4 — Polish**: range zoom; north-up vs track-up; emergency/military/type alerts + speaker ping; RTC night auto-dim; IMU face-down sleep / shake-to-refresh; OTA; persist settings.
+- **M4 — Polish**: range zoom; north-up vs track-up; emergency/military/type alerts + speaker ping; idle auto-dim; IMU face-down sleep / shake-to-refresh; OTA; persist settings.
 
 ## Conventions & guardrails
 - C++17. Keep the render path non-blocking — no network or `delay()` in the LVGL loop; all I/O lives in `adsb_task`.
