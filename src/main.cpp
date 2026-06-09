@@ -87,7 +87,7 @@ static void adsb_task(void*) {
                     g_feedOk = true;
                     lastFeedOk = nowMs;
                     if (xSemaphoreTake(g_ac_mutex, pdMS_TO_TICKS(200)) == pdTRUE) {
-                        g_aircraft = fresh;
+                        g_aircraft.swap(fresh);   // O(1) handoff: no per-Aircraft String copies under the lock
                         g_acDirty = true;
                         xSemaphoreGive(g_ac_mutex);
                     }
@@ -552,8 +552,8 @@ void loop() {
     // Push a fresh ADS-B snapshot to the radar (copy under the mutex, render outside).
     if (g_acDirty) {
         if (xSemaphoreTake(g_ac_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-            g_snap = g_aircraft;
-            g_acDirty = false;
+            g_snap.swap(g_aircraft);   // O(1) handoff under the lock; render on g_snap outside it.
+            g_acDirty = false;         // g_aircraft now holds the previous snapshot (overwritten next poll)
             xSemaphoreGive(g_ac_mutex);
             radar::update(g_snap, g_settings); // rebuild the glyph/trail layer
             ui_on_data_updated();              // refresh card/list/stats

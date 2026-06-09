@@ -190,22 +190,17 @@ void ui_set_netinfo(const char *line) {
     if (s_statsNet && line) lv_label_set_text(s_statsNet, line);
 }
 
-void ui_on_data_updated(void) {
-    refresh_card();
-    if (s_hudCount) {
-        char cbuf[8];
-        snprintf(cbuf, sizeof(cbuf), "%d", radar::countInRange());
-        lv_label_set_text(s_hudCount, cbuf);
-    }
-
-    // list view
+// Rebuild the scrollable contact list. Costly (deletes+recreates LVGL buttons), so we
+// only call it when the list tile is actually visible — not on every 2 s poll.
+static void build_list(void) {
+    if (!s_list) return;
     lv_obj_clean(s_list);
     const int n = radar::count();
     for (int i = 0; i < n; ++i) {
         AcInfo in;
         radar::info(i, in);
         char txt[56];
-        snprintf(txt, sizeof(txt), "%-8s  %5.0f ft  %4.1f km",
+        snprintf(txt, sizeof(txt), "%-8.8s  %5.0f ft  %4.1f km",
                  in.call[0] ? in.call : in.hex, in.onGround ? 0.0f : in.altFt, in.distKm);
         lv_obj_t *b = lv_list_add_btn(s_list, NULL, txt);
         lv_obj_set_style_bg_opa(b, LV_OPA_TRANSP, 0);
@@ -214,8 +209,11 @@ void ui_on_data_updated(void) {
         lv_obj_set_user_data(b, (void *)(intptr_t)i);
         lv_obj_add_event_cb(b, list_btn_cb, LV_EVENT_CLICKED, NULL);
     }
+}
 
-    // stats view
+static void build_stats(void) {
+    if (!s_statsLbl) return;
+    const int n = radar::count();
     int emg = 0;
     float nearest = 1e9f, highest = -1e9f;
     char nearestCall[12] = "-";
@@ -237,6 +235,24 @@ void ui_on_data_updated(void) {
              n, emg, n ? nearestCall : "-", n ? nearest : 0.0f,
              (highest > -1e8f) ? highest : 0.0f, (double)RANGE_KM_DEFAULT);
     lv_label_set_text(s_statsLbl, st);
+}
+
+// Rebuild whichever of list/stats is currently on screen (called on poll and on swipe).
+static void refresh_active_tile(void) {
+    if (!s_tv) return;
+    lv_obj_t *act = lv_tileview_get_tile_act(s_tv);
+    if (act == s_tileList)  build_list();
+    else if (act == s_tileStats) build_stats();
+}
+
+void ui_on_data_updated(void) {
+    refresh_card();
+    if (s_hudCount) {
+        char cbuf[8];
+        snprintf(cbuf, sizeof(cbuf), "%d", radar::countInRange());
+        lv_label_set_text(s_hudCount, cbuf);
+    }
+    refresh_active_tile();   // only the visible tile pays the rebuild cost
 }
 
 // ------------------------------------------------------------------- building
@@ -400,6 +416,9 @@ void ui_create(void) {
     s_tileRadar = lv_tileview_add_tile(s_tv, 0, 0, LV_DIR_RIGHT);
     s_tileList  = lv_tileview_add_tile(s_tv, 1, 0, LV_DIR_HOR);
     s_tileStats = lv_tileview_add_tile(s_tv, 2, 0, LV_DIR_LEFT);
+    // Rebuild the list/stats with the latest data the moment they slide into view
+    // (between polls they'd otherwise show whatever was there when last visible).
+    lv_obj_add_event_cb(s_tv, [](lv_event_t *) { refresh_active_tile(); }, LV_EVENT_VALUE_CHANGED, nullptr);
 
     // --- radar tile ---
     lv_obj_clear_flag(s_tileRadar, LV_OBJ_FLAG_SCROLLABLE);
