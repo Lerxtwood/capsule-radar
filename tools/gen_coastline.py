@@ -17,9 +17,9 @@ import sys
 # coastline reads as a smooth curve even at the 10-30 km ranges. Use the 1:10m
 # Natural Earth coastline as input; 1:50m is too coarse (only ~5 vertices within
 # 30 km of a coastal home). Coarser tol = fewer points (smaller header) but blockier.
-TOLERANCE_DEG = 0.006
+TOLERANCE_DEG = 0.0025
 MIN_POINTS = 2            # drop polylines shorter than this after simplification
-SCALE = 100.0            # degrees -> int16 (lon*100 in [-18000,18000] fits int16)
+SCALE = 180.0            # degrees -> int16: lon*180 in [-32400,32400] still fits int16 (~0.6 km res)
 
 
 def perp_dist(p, a, b):
@@ -91,8 +91,8 @@ def main():
     for pl in polylines:
         n = 0
         for lon, lat in pl:
-            lat_s = max(-9000, min(9000, round(lat * SCALE)))
-            lon_s = max(-18000, min(18000, round(lon * SCALE)))
+            lat_s = max(-int(90 * SCALE),  min(int(90 * SCALE),  round(lat * SCALE)))
+            lon_s = max(-int(180 * SCALE), min(int(180 * SCALE), round(lon * SCALE)))
             coords.append(lat_s)
             coords.append(lon_s)
             n += 1
