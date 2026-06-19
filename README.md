@@ -1,7 +1,13 @@
 # Capsule Radar 🛩️
 
 <p align="center">
-  <a href="https://makerworld.com/en/models/2907695-capsule-radar-live-flight-radar-desk-gadget"><img src="https://img.shields.io/badge/MakerWorld-3D%20printable%20enclosure-0078FF?logo=bambulab&logoColor=white" alt="Capsule Radar on MakerWorld"></a>
+  <a href="https://socquique.github.io/capsule-radar/"><img src="https://img.shields.io/badge/Flash%20in%20browser-FF6D00?logo=googlechrome&logoColor=white" alt="Flash in browser"></a>
+  <a href="https://makerworld.com/en/models/2907695-capsule-radar-live-flight-radar-desk-gadget"><img src="https://img.shields.io/badge/MakerWorld-3D%20case-1A8917?logo=bambulab&logoColor=white" alt="MakerWorld – 3D case"></a>
+  <img src="https://img.shields.io/badge/board-ESP32--S3%20round%20AMOLED-E7352C?logo=espressif&logoColor=white" alt="Board: ESP32-S3 round AMOLED">
+  <a href="https://github.com/socquique/capsule-radar/releases"><img src="https://img.shields.io/github/v/tag/socquique/capsule-radar?label=firmware&color=7B42BC" alt="Firmware version"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/code-MIT-2088FF" alt="License: MIT"></a>
+  <img src="https://img.shields.io/github/languages/count/socquique/capsule-radar?label=languages&color=FFC107" alt="Languages">
+  <a href="https://github.com/socquique/capsule-radar/stargazers"><img src="https://img.shields.io/github/stars/socquique/capsule-radar?style=social" alt="GitHub stars"></a>
 </p>
 
 A live **ADS-B aircraft radar** for the **Waveshare ESP32-S3-Touch-AMOLED-1.75** — a round 466×466 AMOLED with capacitive touch. It pulls nearby aircraft from a free online feed over WiFi and plots them on a touch radar scope centered on your location, with live flight details and selectable visual skins.
@@ -96,4 +102,4 @@ docs/                hardware / data-source / architecture notes
 
 ## Data & license
 
-Aircraft data: **airplanes.live** (free, **non-commercial / educational** — exactly this project; be polite with request cadence). Routes: **adsbdb.com** (free). Personal/hobby project. The 3D-printed enclosure is published on [MakerWorld](https://makerworld.com/en/models/2907695-capsule-radar-live-flight-radar-desk-gadget) (enclosure + this firmware).
+**Firmware / code: [MIT](LICENSE)** — fork and build on it freely (keep the notice). Aircraft data: **airplanes.live** (free, **non-commercial / educational** — exactly this project; be polite with request cadence). Routes: **adsbdb.com** (free). Personal/hobby project. The 3D-printed enclosure is published on [MakerWorld](https://makerworld.com/en/models/2907695-capsule-radar-live-flight-radar-desk-gadget) (enclosure + this firmware).
