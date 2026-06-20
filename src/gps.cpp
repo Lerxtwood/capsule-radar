@@ -23,6 +23,8 @@
 #define GPS_BUF         768        // fixed Wire RX buffer (>= GPS_READ_MAX); set once, never resized
 #define GPS_POLL_MS     2000       // poll often enough that a 720 B read keeps up with NMEA output
 #define GPS_POLL_FIX_MS 60000      // once fixed, home is set — back right off (rare blocking hitch)
+#define GPS_FIX_TTL_MS  70000      // how long a fix stays "valid" — must exceed GPS_POLL_FIX_MS so the
+                                   //   fix doesn't expire between the 60 s polls (else it re-polls early)
 #define GPS_I2C_HZ      100000     // the read protocol is unreliable at the 400 kHz bus default
 #define GPS_BUS_HZ      400000     // restore the shared bus to this after each GPS transaction
 #define GPS_TIMEOUT_MS  1000       // the module clock-stretches while preparing data; 50 ms (default) times out
@@ -114,7 +116,7 @@ void gps_poll() {
 }
 
 bool gps_has_fix() {
-    return s_gps.location.isValid() && s_gps.location.age() < 10000;   // fix seen in the last 10 s
+    return s_gps.location.isValid() && s_gps.location.age() < GPS_FIX_TTL_MS;
 }
 
 bool gps_location(double *lat, double *lon) {
