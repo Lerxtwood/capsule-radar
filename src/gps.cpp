@@ -18,9 +18,10 @@
 #define GPS_ADDR_W      0x50
 #define GPS_ADDR_R      0x54
 #define GPS_SETTLE_MS   100        // settle between each protocol step (LC76G is fussy)
-#define GPS_READ_MAX    1536       // max bytes drained per transaction (one NMEA batch ~1.4 KB)
-#define GPS_BUF         1600       // fixed Wire RX buffer (>= GPS_READ_MAX); set once, never resized
-#define GPS_POLL_MS     4000       // transaction cadence while still acquiring a fix
+#define GPS_READ_MAX    720        // max bytes drained per transaction (kept small: a big Wire RX
+                                   //   buffer steals the contiguous internal RAM the TLS feed needs)
+#define GPS_BUF         768        // fixed Wire RX buffer (>= GPS_READ_MAX); set once, never resized
+#define GPS_POLL_MS     2000       // poll often enough that a 720 B read keeps up with NMEA output
 #define GPS_POLL_FIX_MS 60000      // once fixed, home is set — back right off (rare blocking hitch)
 #define GPS_I2C_HZ      100000     // the read protocol is unreliable at the 400 kHz bus default
 #define GPS_BUS_HZ      400000     // restore the shared bus to this after each GPS transaction
@@ -35,6 +36,13 @@ static TinyGPSPlus s_gps;
 // One blocking, uninterrupted drain of up to GPS_READ_MAX bytes into the parser.
 // Returns bytes read (0 if nothing queued or a step failed). Caller has set 100 kHz + long timeout.
 static int gps_drain() {
+    // 0) un-stick the module: other shared-bus traffic (LVGL polls the touch IC continuously
+    //    between our calls) can leave the LC76G mid-response and unable to answer at 0x50; a
+    //    stray 1-byte read at 0x54/0x58 kicks it back to normal (Quectel quirk). 1-byte reads,
+    //    no extra RAM.
+    Wire.requestFrom((uint8_t)GPS_ADDR_R, (uint8_t)1); while (Wire.available()) Wire.read();
+    Wire.requestFrom((uint8_t)0x58,        (uint8_t)1); while (Wire.available()) Wire.read();
+
     // 1) query how many bytes are queued — retry, since prior shared-bus traffic can briefly
     //    leave the module unable to answer the first attempt.
     uint32_t avail = 0;
@@ -70,10 +78,12 @@ static int gps_drain() {
 }
 
 bool gps_begin() {
-    Wire.setBufferSize(GPS_BUF);                      // sized ONCE here; never resized at runtime
+    // probe with the default buffer first; only bump it on a real -G board (and only once,
+    // here at boot before TLS comes up) so non-GPS boards keep their small internal footprint.
     Wire.beginTransmission(GPS_ADDR_W);
     Wire.write(QLEN, sizeof(QLEN));
     s_present = (Wire.endTransmission() == 0);        // 0x50 ACKs only on the -G variant
+    if (s_present) Wire.setBufferSize(GPS_BUF);       // sized ONCE; never resized at runtime
     Serial.printf("[gps] LC76G %s\n", s_present ? "detected on I2C" : "not present");
     return s_present;
 }
