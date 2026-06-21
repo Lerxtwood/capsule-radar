@@ -57,6 +57,31 @@ static float                 g_requeryKm = 0.0f;
 static volatile bool         g_feedOk = true;                        // ADS-B feed healthy? (HUD warning)
 static volatile uint32_t     g_lastFeedOkMs = 0;                     // millis() of the last good poll (HUD staleness)
 static volatile uint32_t     g_rebootAtMs = 0;                       // !=0: reboot when millis() reaches it (clean start after WiFi config)
+static String                g_tz = TZ_STR;                          // POSIX timezone (web-configurable, NVS); applied via configTzTime
+
+// Web-selectable time zones (label + POSIX TZ). The <option> value is the index; the save
+// handler maps it back to the POSIX string stored in NVS and used by configTzTime at boot.
+// (Index avoids putting POSIX strings with '<>' / ',' into HTML attributes.)
+static const struct { const char *label; const char *tz; } TZOPTS[] = {
+    {"UTC",                      "UTC0"},
+    {"London / Lisbon",          "GMT0BST,M3.5.0/1,M10.5.0"},
+    {"Madrid / Paris / Berlin",  "CET-1CEST,M3.5.0,M10.5.0/3"},
+    {"Athens / Helsinki",        "EET-2EEST,M3.5.0/3,M10.5.0/4"},
+    {"New York (US Eastern)",    "EST5EDT,M3.2.0,M11.1.0"},
+    {"Chicago (US Central)",     "CST6CDT,M3.2.0,M11.1.0"},
+    {"Denver (US Mountain)",     "MST7MDT,M3.2.0,M11.1.0"},
+    {"Phoenix (Arizona)",        "MST7"},
+    {"Los Angeles (US Pacific)", "PST8PDT,M3.2.0,M11.1.0"},
+    {"Anchorage (Alaska)",       "AKST9AKDT,M3.2.0,M11.1.0"},
+    {"Honolulu (Hawaii)",        "HST10"},
+    {"Argentina / Brazil (E)",   "<-03>3"},
+    {"India (IST)",              "<+0530>-5:30"},
+    {"China / Singapore",        "<+08>-8"},
+    {"Japan / Korea",            "JST-9"},
+    {"Sydney (AU Eastern)",      "AEST-10AEDT,M10.1.0,M4.1.0/3"},
+    {"Auckland (NZ)",            "NZST-12NZDT,M9.5.0,M4.1.0/3"},
+};
+static const int TZOPTS_N = sizeof(TZOPTS) / sizeof(TZOPTS[0]);
 
 // ---- networking task (core 0): fetch + parse, never touches the display ----
 static void adsb_task(void*) {
@@ -68,7 +93,7 @@ static void adsb_task(void*) {
         const bool conn = (WiFi.status() == WL_CONNECTED);
         if (conn && !wasConnected) {
             Serial.printf("[adsb] WiFi up, IP %s\n", WiFi.localIP().toString().c_str());
-            configTzTime(TZ_STR, "pool.ntp.org", "time.nist.gov");  // local time (Spain)
+            configTzTime(g_tz.c_str(), "pool.ntp.org", "time.nist.gov");  // local time (web-configurable TZ)
             Serial.println("[web] config: http://capsuleradar.local/  (or the IP above)");
             // mDNS + OTA are started on core 1 (loop) to keep all mDNS use on one core
         }
@@ -153,6 +178,7 @@ static void loadSettings() {
     g_trailLen         = p.getInt("traillen", 2);
     g_idleDimMs        = p.getUInt("idledim", IDLE_DIM_MS);
     g_units            = p.getInt("units", 0);
+    g_tz               = p.getString("tz", TZ_STR);
     p.end();
 }
 
@@ -320,6 +346,13 @@ static void handleRoot() {
         snprintf(o, sizeof(o), "<option value=%.3f%s>%s</option>", pkm, sel ? " selected" : "", lbl);
         popts += o;
     }
+    String tzopts;   // time-zone dropdown (value = index into TZOPTS; mapped to POSIX TZ on save)
+    for (int i = 0; i < TZOPTS_N; ++i) {
+        char o[96];
+        snprintf(o, sizeof(o), "<option value=%d%s>%s</option>",
+                 i, g_tz == TZOPTS[i].tz ? " selected" : "", TZOPTS[i].label);
+        tzopts += o;
+    }
     String gpsRow;   // only on the -G variant: offer to auto-set the centre from GPS
     if (gps_present()) {
         gpsRow  = "<label><input type=checkbox class=ck ";
@@ -328,8 +361,10 @@ static void handleRoot() {
         gpsRow += "<div style='font-size:12px;opacity:.6;margin:-2px 0 6px'>"
                   "When on, the location above is used until the GPS gets a fix, then it takes over.</div>";
     }
-    static char buf[8400];   // static (not on the 8 KB loop-task stack) to avoid overflow
-    snprintf(buf, sizeof(buf),
+    static const size_t BUFSZ = 10240;
+    static char *buf = (char *)ps_malloc(BUFSZ);   // PSRAM: keep this big page buffer off the scarce
+    if (!buf) return;                              //   internal heap (the contiguous RAM mbedTLS needs)
+    snprintf(buf, BUFSZ,
         "<!DOCTYPE html><html><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
         "<title>Capsule Radar</title>"
@@ -368,6 +403,7 @@ static void handleRoot() {
         "%s"
         "<label>Display range</label><select name=range>%s</select>"
         "<label>Theme</label><select name=theme>%s</select>"
+        "<label>Time zone</label><select name=tz>%s</select>"
         "<button>Save &amp; restart</button></form></div>"
         "<div class=card><div class=t>Display</div>"
         "<label>Brightness</label>"
@@ -411,6 +447,7 @@ static void handleRoot() {
         "function px(v){fetch('/alerts?prox='+v+'&save=1')}"
         "function gp(c){fetch('/gps?v='+(c?1:0)+'&save=1')}</script></body></html>",
         g_settings.homeLat, g_settings.homeLon, gpsRow.c_str(), ropts.c_str(), topts.c_str(),
+        tzopts.c_str(),
         g_brightnessDay, iopts.c_str(), g_showSweep ? "checked" : "",
         g_showAirports ? "checked" : "", tlopts.c_str(), rotopts.c_str(), uopts.c_str(),
         g_volume, g_muted ? "checked" : "", aopts.c_str(), popts.c_str(),
@@ -432,6 +469,10 @@ static void handleSave() {
     }
     if (g_web.hasArg("range")) p.putFloat("rangeKm", g_web.arg("range").toFloat());
     if (g_web.hasArg("theme")) p.putInt("theme", g_web.arg("theme").toInt());
+    if (g_web.hasArg("tz")) {
+        const int i = g_web.arg("tz").toInt();
+        if (i >= 0 && i < TZOPTS_N) p.putString("tz", TZOPTS[i].tz);
+    }
     p.end();
     g_web.send(200, "text/html",
         "<meta http-equiv=refresh content='4;url=/'><body style='background:#06100a;color:#1dff86;"
