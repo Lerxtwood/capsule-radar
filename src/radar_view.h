@@ -48,6 +48,7 @@ int  hitTest(int x, int y);
 
 // Selection (tracked by hex so it survives data updates). idx < 0 clears.
 void select(int idx);
+void selectHex(const char *hex);             // select by ICAO hex, or clear on null/empty
 bool selected(AcInfo& out);                 // false if nothing selected/visible
 
 // Snapshot access for the list / stats views.

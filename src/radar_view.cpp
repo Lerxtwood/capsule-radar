@@ -511,14 +511,20 @@ static void ac_draw_cb(lv_event_t *e) {
             lv_draw_label_dsc_init(&lc);
             lc.font = &lv_font_montserrat_14;
             lc.color = s_cInk;
-            lv_area_t a1 = { (lv_coord_t)(ac.pos.x + 12), (lv_coord_t)(ac.pos.y - 14),
-                             (lv_coord_t)(ac.pos.x + 142), (lv_coord_t)(ac.pos.y + 2) };
+            lv_area_t a1 = { (lv_coord_t)(ac.pos.x + 12), (lv_coord_t)(ac.pos.y - 20),
+                             (lv_coord_t)(ac.pos.x + 142), (lv_coord_t)(ac.pos.y - 4) };
             if (ac.call[0]) lv_draw_label(d, &lc, &a1, ac.call, NULL);
+            lv_draw_label_dsc_t lt;
+            lv_draw_label_dsc_init(&lt);
+            lt.font = &lv_font_montserrat_12;
+            lt.color = s_cInk;
+            lv_area_t at = { a1.x1, (lv_coord_t)(ac.pos.y - 3), a1.x2, (lv_coord_t)(ac.pos.y + 14) };
+            if (ac.type[0]) lv_draw_label(d, &lt, &at, ac.type, NULL);
             lv_draw_label_dsc_t la;
             lv_draw_label_dsc_init(&la);
             la.font = &lv_font_montserrat_12;
             la.color = ac.color;
-            lv_area_t a2 = { a1.x1, (lv_coord_t)(ac.pos.y + 2), a1.x2, (lv_coord_t)(ac.pos.y + 20) };
+            lv_area_t a2 = { a1.x1, (lv_coord_t)(ac.pos.y + 13), a1.x2, (lv_coord_t)(ac.pos.y + 31) };
             if (ac.altTxt[0]) lv_draw_label(d, &la, &a2, ac.altTxt, NULL);
         }
     }
@@ -894,6 +900,12 @@ static void fill_info(const AcDraw &a, AcInfo &out) {
 void select(int idx) {
     if (idx < 0 || idx >= (int)s_acs.size()) s_selHex.clear();
     else s_selHex = s_acs[idx].hex;
+    if (s_acLayer) lv_obj_invalidate(s_acLayer);
+}
+
+void selectHex(const char *hex) {
+    if (!hex || !hex[0]) s_selHex.clear();
+    else s_selHex = hex;
     if (s_acLayer) lv_obj_invalidate(s_acLayer);
 }
 

@@ -251,8 +251,10 @@ static void updatePrefetchIndicators() {
         const bool photoDone = photo_done(g_prefetching[i].hex.c_str());
         const uint32_t elapsed = millis() - g_prefetching[i].startedMs;
         const bool timedOut = elapsed > 60000UL;
-        if (((routeDone && photoDone) && elapsed >= 1500UL) || timedOut) {
+        const bool completed = (routeDone && photoDone) && elapsed >= 1500UL;
+        if (completed || timedOut) {
             radar::setPrefetching(g_prefetching[i].hex.c_str(), false);
+            if (completed) ui_preview_aircraft(g_prefetching[i].hex.c_str(), 5000);
             g_prefetching.erase(g_prefetching.begin() + i);
         } else ++i;
     }

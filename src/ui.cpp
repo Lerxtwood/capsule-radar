@@ -22,6 +22,8 @@ static lv_obj_t *s_tileRadar = nullptr, *s_tileList = nullptr, *s_tileStats = nu
 static lv_obj_t *s_card = nullptr, *s_cardTitle = nullptr, *s_cardL = nullptr, *s_cardR = nullptr;
 static lv_obj_t *s_cardRoute = nullptr;
 static lv_obj_t *s_photo = nullptr, *s_photoCredit = nullptr;   // aircraft photo above the card
+static lv_timer_t *s_previewTimer = nullptr;
+static bool s_autoPreview = false;
 static char s_lastRouteReq[12] = "";
 static lv_obj_t *s_hudWifi = nullptr, *s_hudCount = nullptr, *s_hudClock = nullptr, *s_hudBatt = nullptr, *s_hudDate = nullptr;
 static lv_obj_t *s_hudBars[4] = { nullptr, nullptr, nullptr, nullptr };   // WiFi signal-strength bars
@@ -219,6 +221,7 @@ static void radar_longpress_cb(lv_event_t *e) {   // long-press cycles the visua
 static void radar_clicked_cb(lv_event_t *e) {
     (void)e;
     if (s_longPressed) { s_longPressed = false; return; }   // ignore the click after a long-press
+    s_autoPreview = false;                                  // manual selection owns the card now
     lv_indev_t *indev = lv_indev_get_act();
     if (!indev) return;
     lv_point_t p;
@@ -230,6 +233,7 @@ static void radar_clicked_cb(lv_event_t *e) {
 static void list_btn_cb(lv_event_t *e) {
     lv_obj_t *b = lv_event_get_target(e);
     const int idx = (int)(intptr_t)lv_obj_get_user_data(b);
+    s_autoPreview = false;                                  // manual selection owns the card now
     radar::select(idx);
     refresh_card();
     lv_obj_set_tile_id(s_tv, 0, 0, LV_ANIM_ON);   // jump back to the radar
@@ -365,6 +369,31 @@ void ui_on_data_updated(void) {
         lv_label_set_text(s_hudCount, cbuf);
     }
     refresh_active_tile();   // only the visible tile pays the rebuild cost
+}
+
+static void preview_timer_cb(lv_timer_t *t) {
+    (void)t;
+    if (s_autoPreview) {
+        s_autoPreview = false;
+        radar::selectHex(nullptr);
+        refresh_card();
+    }
+    if (s_previewTimer) {
+        lv_timer_del(s_previewTimer);
+        s_previewTimer = nullptr;
+    }
+}
+
+void ui_preview_aircraft(const char *hex, uint32_t ms) {
+    if (!hex || !hex[0]) return;
+    s_autoPreview = true;
+    radar::selectHex(hex);
+    refresh_card();
+    if (s_previewTimer) {
+        lv_timer_del(s_previewTimer);
+        s_previewTimer = nullptr;
+    }
+    s_previewTimer = lv_timer_create(preview_timer_cb, ms ? ms : 5000, nullptr);
 }
 
 // ------------------------------------------------------------------- building
