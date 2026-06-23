@@ -44,9 +44,12 @@ static int                   g_alertMode = 2;                        // 0=off 1=
 static float                 g_proximityKm = 0.0f;                   // proximity alert radius, km (0=off) (web/NVS)
 static uint32_t              g_idleDimMs = IDLE_DIM_MS;              // dim after this idle time (0 = never)
 static bool                  g_showSweep = true;                     // rotating sweep line on/off (web/NVS)
+static bool                  g_prefetchDetails = true;               // preload route/photo for new in-range aircraft
+static bool                  g_genericPhotos = true;                 // type-based Wikimedia fallback when exact photo is absent
 static int                   g_units = 0;                            // 0=Aviation 1=Metric 2=Imperial (web/NVS)
 static bool                  g_showAirports = true;                  // airport markers on/off (web/NVS)
 static int                   g_rotation = 0;                         // display rotation 0/1/2/3 = 0/90/180/270 (web/NVS)
+static int                   g_rotationOffset = 0;                   // fine display rotation adjustment, degrees (web/NVS)
 static bool                  g_useGps = false;                       // auto-set home from the LC76G GPS (-G variant) (web/NVS)
 static int                   g_trailLen = 2;                         // aircraft trails 0=off 1=short 2=med 3=long (web/NVS)
 static volatile bool         g_onBattery = false;                    // discharging (set on core 1, read on core 0)
@@ -58,6 +61,8 @@ static volatile bool         g_feedOk = true;                        // ADS-B fe
 static volatile uint32_t     g_lastFeedOkMs = 0;                     // millis() of the last good poll (HUD staleness)
 static volatile uint32_t     g_rebootAtMs = 0;                       // !=0: reboot when millis() reaches it (clean start after WiFi config)
 static String                g_tz = TZ_STR;                          // POSIX timezone (web-configurable, NVS); applied via configTzTime
+struct PrefetchTrack { std::string hex, call; uint32_t startedMs; };
+static std::vector<PrefetchTrack> g_prefetching;
 
 // Web-selectable time zones (label + POSIX TZ). The <option> value is the index; the save
 // handler maps it back to the POSIX string stored in NVS and used by configTzTime at boot.
@@ -158,8 +163,9 @@ static void adsb_task(void*) {
                     Serial.printf("[route] %s: no route\n", wantCall);
                 }
             }
-            char wantHex[10];
-            if (photo_pending(wantHex, sizeof(wantHex))) photo_fetch(wantHex);
+            char wantHex[10], wantType[8];
+            if (photo_pending(wantHex, sizeof(wantHex), wantType, sizeof(wantType)))
+                photo_fetch(wantHex, g_genericPhotos ? wantType : "");
         }
         vTaskDelay(pdMS_TO_TICKS(250));
     }
@@ -180,6 +186,8 @@ static void loadSettings() {
     g_trailLen         = p.getInt("traillen", 2);
     g_idleDimMs        = p.getUInt("idledim", IDLE_DIM_MS);
     g_units            = p.getInt("units", 0);
+    g_prefetchDetails  = p.getBool("prefetch", true);
+    g_genericPhotos    = p.getBool("genericpic", true);
     g_tz               = p.getString("tz", TZ_STR);
     p.end();
 }
@@ -187,7 +195,7 @@ static void loadSettings() {
 // Audio alerts. g_alertMode: 0 = off, 1 = emergencies only, 2 = new aircraft + emergencies.
 // g_proximityKm > 0 also pings (once) when any aircraft crosses into that radius.
 static void checkAudioEvents() {
-    if (!audio_present()) return;
+    const bool canAudio = audio_present();
     static std::set<std::string> seen, seenProx;
     static bool first = true;
     static uint32_t lastNew = 0;
@@ -203,13 +211,25 @@ static void checkAudioEvents() {
         // proximity: fire once, when an aircraft first crosses into the radius (any aircraft)
         if (g_proximityKm > 0.0f && d <= g_proximityKm) {
             nowProx.insert(hex);
-            if (!first && !seenProx.count(hex)) audio_play(AUDIO_ALERT);
+            if (canAudio && !first && !seenProx.count(hex)) audio_play(AUDIO_ALERT);
         }
 
         // new-in-range pings (on entry), gated by the alert mode
         if (isNew) {
-            if (emergency) { if (g_alertMode >= 1) audio_play(AUDIO_ALERT); }   // emergencies only / +new
-            else if (g_alertMode >= 2 && millis() - lastNew > 3000) {
+            if (g_prefetchDetails) {
+                if (ac.flight.length()) route_prefetch(ac.flight.c_str());
+                photo_prefetch(ac.hex.c_str(), ac.type.c_str());
+                bool tracked = false;
+                for (PrefetchTrack &p : g_prefetching) {
+                    if (p.hex != hex) continue;
+                    p.call = ac.flight.c_str(); p.startedMs = millis(); tracked = true; break;
+                }
+                if (!tracked) g_prefetching.push_back({hex, ac.flight.c_str(), millis()});
+                radar::setPrefetching(ac.hex.c_str(), true);
+                Serial.printf("[prefetch] queued %s / %s\n", ac.flight.c_str(), ac.hex.c_str());
+            }
+            if (canAudio && emergency) { if (g_alertMode >= 1) audio_play(AUDIO_ALERT); }   // emergencies only / +new
+            else if (canAudio && g_alertMode >= 2 && millis() - lastNew > 3000) {
                 audio_play(AUDIO_NEW);                                          // new contact (rate-limited)
                 lastNew = millis();
             }
@@ -218,6 +238,24 @@ static void checkAudioEvents() {
     seen.swap(now);
     seenProx.swap(nowProx);
     first = false;
+}
+
+static void updatePrefetchIndicators() {
+    static uint32_t lastCheck = 0;
+    if (millis() - lastCheck < 200) return;
+    lastCheck = millis();
+    for (size_t i = 0; i < g_prefetching.size();) {
+        char from[40], to[40];
+        const bool routeDone = g_prefetching[i].call.empty() ||
+            route_get(g_prefetching[i].call.c_str(), from, sizeof(from), to, sizeof(to));
+        const bool photoDone = photo_done(g_prefetching[i].hex.c_str());
+        const uint32_t elapsed = millis() - g_prefetching[i].startedMs;
+        const bool timedOut = elapsed > 60000UL;
+        if (((routeDone && photoDone) && elapsed >= 1500UL) || timedOut) {
+            radar::setPrefetching(g_prefetching[i].hex.c_str(), false);
+            g_prefetching.erase(g_prefetching.begin() + i);
+        } else ++i;
+    }
 }
 
 // Double-tap zoom: change the display range, persist it, and ask adsb_task to
@@ -412,9 +450,12 @@ static void handleRoot() {
         "<input type=range min=5 max=255 value='%d' oninput='b(this.value,0)' onchange='b(this.value,1)'>"
         "<label>Dim screen after</label><select onchange='d(this.value)'>%s</select>"
         "<label><input type=checkbox class=ck %s onchange='sw(this.checked)'>Show radar sweep</label>"
+        "<label><input type=checkbox class=ck %s onchange='pf(this.checked)'>Preload aircraft details</label>"
+        "<label><input type=checkbox class=ck %s onchange='gf(this.checked)'>Use generic aircraft photos</label>"
         "<label><input type=checkbox class=ck %s onchange='ap(this.checked)'>Show airports</label>"
         "<label>Aircraft trails</label><select onchange='tl(this.value)'>%s</select>"
         "<label>Screen rotation (USB-C position)</label><select onchange='ro(this.value)'>%s</select>"
+        "<label>Rotation offset (degrees)</label><input type=number min=-45 max=45 step=1 value='%d' onchange='rf(this.value)'>"
         "<label>Units</label><select onchange='u(this.value)'>%s</select></div>"
         "<div class=card><div class=t>Sound</div>"
         "<label>Volume</label>"
@@ -441,9 +482,12 @@ static void handleRoot() {
         "function t(){fetch('/vol?test=1')}"
         "function d(v){fetch('/idle?v='+v+'&save=1')}"
         "function sw(c){fetch('/sweep?v='+(c?1:0)+'&save=1')}"
+        "function pf(c){fetch('/prefetch?v='+(c?1:0)+'&save=1')}"
+        "function gf(c){fetch('/generic-photos?v='+(c?1:0)+'&save=1')}"
         "function ap(c){fetch('/airports?v='+(c?1:0)+'&save=1')}"
         "function tl(v){fetch('/trail?v='+v+'&save=1')}"
         "function ro(v){fetch('/rotate?v='+v+'&save=1')}"
+        "function rf(v){fetch('/rotate-offset?v='+v+'&save=1')}"
         "function u(v){fetch('/units?v='+v+'&save=1')}"
         "function al(v){fetch('/alerts?mode='+v+'&save=1')}"
         "function px(v){fetch('/alerts?prox='+v+'&save=1')}"
@@ -458,8 +502,9 @@ static void handleRoot() {
         "if(b>=0)e.selectedIndex=b;})();</script></body></html>",
         g_settings.homeLat, g_settings.homeLon, gpsRow.c_str(), ropts.c_str(), topts.c_str(),
         tzopts.c_str(),
-        g_brightnessDay, iopts.c_str(), g_showSweep ? "checked" : "",
-        g_showAirports ? "checked" : "", tlopts.c_str(), rotopts.c_str(), uopts.c_str(),
+        g_brightnessDay, iopts.c_str(), g_showSweep ? "checked" : "", g_prefetchDetails ? "checked" : "",
+        g_genericPhotos ? "checked" : "",
+        g_showAirports ? "checked" : "", tlopts.c_str(), rotopts.c_str(), g_rotationOffset, uopts.c_str(),
         g_volume, g_muted ? "checked" : "", aopts.c_str(), popts.c_str(),
         g_settings.homeLat, g_settings.homeLon, (g_tz == TZ_STR ? 0 : 1));
     g_web.send(200, "text/html", buf);
@@ -588,6 +633,39 @@ static void handleSweep() {   // show/hide the rotating sweep line (live)
     g_web.send(200, "text/plain", "ok");
 }
 
+static void handlePrefetch() {   // preload route/photo when an aircraft enters range
+    if (g_web.hasArg("v")) {
+        g_prefetchDetails = g_web.arg("v").toInt() != 0;
+        if (!g_prefetchDetails) {
+            route_cancel_prefetches();
+            photo_cancel_prefetches();
+            for (const PrefetchTrack &p : g_prefetching) radar::setPrefetching(p.hex.c_str(), false);
+            g_prefetching.clear();
+        }
+        if (g_web.hasArg("save")) {
+            Preferences p;
+            p.begin("capsuleradar", false);
+            p.putBool("prefetch", g_prefetchDetails);
+            p.end();
+        }
+    }
+    g_web.send(200, "text/plain", "ok");
+}
+
+static void handleGenericPhotos() {   // use a type-based generic image when no exact photo exists
+    if (g_web.hasArg("v")) {
+        g_genericPhotos = g_web.arg("v").toInt() != 0;
+        photo_reset_fallback_cache();
+        if (g_web.hasArg("save")) {
+            Preferences p;
+            p.begin("capsuleradar", false);
+            p.putBool("genericpic", g_genericPhotos);
+            p.end();
+        }
+    }
+    g_web.send(200, "text/plain", "ok");
+}
+
 static void handleTrail() {   // aircraft trail length 0/1/2/3 (live)
     if (g_web.hasArg("v")) {
         g_trailLen = constrain((int)g_web.arg("v").toInt(), 0, 3);
@@ -624,6 +702,20 @@ static void handleRotate() {   // display rotation 0/90/180/270 for any USB-C or
             Preferences p;
             p.begin("capsuleradar", false);
             p.putInt("rot", g_rotation);
+            p.end();
+        }
+    }
+    g_web.send(200, "text/plain", "ok");
+}
+
+static void handleRotateOffset() {   // fine display rotation adjustment in degrees (live)
+    if (g_web.hasArg("v")) {
+        g_rotationOffset = constrain((int)g_web.arg("v").toInt(), -45, 45);
+        display::setRotationOffset((int8_t)g_rotationOffset);
+        if (g_web.hasArg("save")) {
+            Preferences p;
+            p.begin("capsuleradar", false);
+            p.putInt("rotoff", g_rotationOffset);
             p.end();
         }
     }
@@ -716,12 +808,14 @@ void setup() {
         g_showSweep = p.getBool("sweep", true);
         g_showAirports = p.getBool("airports", true);
         g_rotation = p.getInt("rot", 0);
+        g_rotationOffset = constrain(p.getInt("rotoff", 0), -45, 45);
         p.end();
         radar::setTheme(t);
         radar::setSweepEnabled(g_showSweep);
         radar::setAirportsEnabled(g_showAirports);
         radar::setTrailLength(g_trailLen);
         display::setRotation((uint8_t)g_rotation);
+        display::setRotationOffset((int8_t)g_rotationOffset);
     }
     radar::setThemeChangedCb(saveTheme);
     ui_set_range_cb(onRangeChange);              // on-screen zoom button
@@ -792,9 +886,12 @@ void setup() {
     g_web.on("/alerts", handleAlerts);
     g_web.on("/idle", handleIdle);
     g_web.on("/sweep", handleSweep);
+    g_web.on("/prefetch", handlePrefetch);
+    g_web.on("/generic-photos", handleGenericPhotos);
     g_web.on("/airports", handleAirports);
     g_web.on("/trail", handleTrail);
     g_web.on("/rotate", handleRotate);
+    g_web.on("/rotate-offset", handleRotateOffset);
     g_web.on("/gps", handleGps);
     g_web.on("/units", handleUnits);
     g_web.on("/update", HTTP_GET, handleUpdatePage);
@@ -842,6 +939,7 @@ void loop() {
             checkAudioEvents();                // ping new-in-range / emergency / military
         }
     }
+    updatePrefetchIndicators();
 
     // periodic: HUD clock + wifi/battery indicators
     static uint32_t lastStatus = 0;

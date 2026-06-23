@@ -139,22 +139,22 @@ static void refresh_card(void) {
         fold_ascii(rt);
         lv_label_set_text(s_cardRoute, rt);
     } else {
+        route_request(in.call);                                  // queue/re-prioritize a cache miss
         lv_label_set_text(s_cardRoute, "Looking up route...");     // pending: lookup in flight
     }
 
     // aircraft photo (planespotters), shown above the card when one is available
-    if (in.hex[0]) photo_request(in.hex);
-    int pw = 0, ph = 0; char pcred[40];
+    if (in.hex[0]) photo_request(in.hex, in.type);
+    int pw = 0, ph = 0; char pcred[72];
     if (s_photo && in.hex[0] && photo_get(in.hex, &pw, &ph, pcred, sizeof(pcred)) && pw > 0 && ph > 0) {
-        int mw, mh;
-        lv_color_t *pbuf = photo_buffer(&mw, &mh);
+        lv_color_t *pbuf = photo_pixels(in.hex);
         lv_canvas_set_buffer(s_photo, pbuf, pw, ph, LV_IMG_CF_TRUE_COLOR);
         lv_obj_set_size(s_photo, pw, ph);
         lv_obj_align(s_photo, LV_ALIGN_CENTER, 0, -28 - ph / 2);   // sit lower: fill the band down to the card
         lv_obj_clear_flag(s_photo, LV_OBJ_FLAG_HIDDEN);
         lv_obj_invalidate(s_photo);
         if (s_photoCredit) {
-            char c[52];
+            char c[96];
             snprintf(c, sizeof(c), "Photo: %s", pcred[0] ? pcred : "planespotters.net");
             lv_label_set_text(s_photoCredit, c);
             lv_obj_align_to(s_photoCredit, s_photo, LV_ALIGN_OUT_BOTTOM_MID, 0, 1);

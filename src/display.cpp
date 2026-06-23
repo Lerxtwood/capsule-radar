@@ -13,6 +13,7 @@
 #include <Arduino_GFX_Library.h>
 #include <lvgl.h>
 #include <esp_heap_caps.h>
+#include <math.h>
 
 // --- Arduino_GFX panel -------------------------------------------------------
 // Typed as Arduino_CO5300* (not Arduino_GFX*) so setBrightness() — declared on
@@ -32,7 +33,20 @@ static volatile uint32_t s_frameCount = 0;   // rendered frames (last-flush), fo
 uint32_t display_frames() { return s_frameCount; }
 
 static volatile uint8_t s_rot = 0;           // display rotation: 0/1/2/3 = 0°/90°/180°/270°
+static volatile int8_t s_rotOffset = 0;       // fine rotation adjustment in degrees (-45..45)
+static volatile int32_t s_rotCos = 65536;     // cached 16.16 inverse-rotation coefficients
+static volatile int32_t s_rotSin = 0;
 static lv_color_t *s_rotBuf = nullptr;       // PSRAM scratch for 90/270° transpose (see begin())
+static lv_color_t *s_frameBuf = nullptr;     // logical full frame used for fine rotation
+static lv_color_t *s_rotFrame = nullptr;     // packed dirty rectangle after fine rotation
+static int16_t s_dirtyX1 = SCREEN_W, s_dirtyY1 = SCREEN_H;
+static int16_t s_dirtyX2 = -1, s_dirtyY2 = -1;
+
+static void update_rotation_coefficients() {
+    const float angle = ((float)s_rot * 90.0f + (float)s_rotOffset) * (float)M_PI / 180.0f;
+    s_rotCos = (int32_t)lroundf(cosf(angle) * 65536.0f);
+    s_rotSin = (int32_t)lroundf(sinf(angle) * 65536.0f);
+}
 
 // LVGL -> panel, applying the chosen rotation while pushing.
 //   0°   : straight through.
@@ -43,6 +57,84 @@ static lv_color_t *s_rotBuf = nullptr;       // PSRAM scratch for 90/270° trans
 static void flush_cb(lv_disp_drv_t *drv, const lv_area_t *area, lv_color_t *px) {
     const int w = (int)(area->x2 - area->x1 + 1);
     const int h = (int)(area->y2 - area->y1 + 1);
+
+    if (s_rotOffset != 0 && s_frameBuf && s_rotFrame) {
+        for (int y = 0; y < h; ++y)
+            memcpy(&s_frameBuf[(area->y1 + y) * SCREEN_W + area->x1], &px[y * w],
+                   (size_t)w * sizeof(lv_color_t));
+
+        if (area->x1 < s_dirtyX1) s_dirtyX1 = area->x1;
+        if (area->y1 < s_dirtyY1) s_dirtyY1 = area->y1;
+        if (area->x2 > s_dirtyX2) s_dirtyX2 = area->x2;
+        if (area->y2 > s_dirtyY2) s_dirtyY2 = area->y2;
+
+        if (lv_disp_flush_is_last(drv)) {
+            const int32_t cs = s_rotCos, sn = s_rotSin;
+            const int32_t cx = (SCREEN_W - 1) << 15;
+            const int32_t cy = (SCREEN_H - 1) << 15;
+            int px1 = SCREEN_W - 1, py1 = SCREEN_H - 1, px2 = 0, py2 = 0;
+
+            // Rotate the four corners of the accumulated logical dirty area to find
+            // the physical rectangle that can have changed. Two extra pixels cover
+            // nearest-neighbour rounding at the edges.
+            const int lx[4] = {s_dirtyX1, s_dirtyX2, s_dirtyX1, s_dirtyX2};
+            const int ly[4] = {s_dirtyY1, s_dirtyY1, s_dirtyY2, s_dirtyY2};
+            for (int i = 0; i < 4; ++i) {
+                const int32_t dx = (lx[i] << 16) - cx;
+                const int32_t dy = (ly[i] << 16) - cy;
+                const int tx = (cx + (int32_t)(((int64_t)cs * dx - (int64_t)sn * dy) >> 16) + 32768) >> 16;
+                const int ty = (cy + (int32_t)(((int64_t)sn * dx + (int64_t)cs * dy) >> 16) + 32768) >> 16;
+                if (tx < px1) px1 = tx;
+                if (tx > px2) px2 = tx;
+                if (ty < py1) py1 = ty;
+                if (ty > py2) py2 = ty;
+            }
+            px1 = constrain(px1 - 2, 0, SCREEN_W - 1);
+            py1 = constrain(py1 - 2, 0, SCREEN_H - 1);
+            px2 = constrain(px2 + 2, 0, SCREEN_W - 1);
+            py2 = constrain(py2 + 2, 0, SCREEN_H - 1);
+
+            // CO5300 QSPI address windows must start on an even pixel and end on
+            // an odd pixel. The logical LVGL area was aligned by rounder_cb, but
+            // rotating its bounding box changes that parity.
+            px1 &= ~1;
+            py1 &= ~1;
+            px2 |= 1;
+            py2 |= 1;
+            if (px2 >= SCREEN_W) px2 = SCREEN_W - 1;
+            if (py2 >= SCREEN_H) py2 = SCREEN_H - 1;
+
+            const int outW = px2 - px1 + 1;
+            const int outH = py2 - py1 + 1;
+            const int32_t x0 = (px1 << 16) - cx;
+            for (int y = py1; y <= py2; ++y) {
+                const int32_t dy = (y << 16) - cy;
+                int32_t sx_fp = cx + (int32_t)(((int64_t)cs * x0 + (int64_t)sn * dy) >> 16);
+                int32_t sy_fp = cy + (int32_t)((-(int64_t)sn * x0 + (int64_t)cs * dy) >> 16);
+                lv_color_t *dst = &s_rotFrame[(y - py1) * outW];
+                for (int x = px1; x <= px2; ++x) {
+                    const int sx = (sx_fp + 32768) >> 16;
+                    const int sy = (sy_fp + 32768) >> 16;
+                    *dst++ =
+                        (sx >= 0 && sx < SCREEN_W && sy >= 0 && sy < SCREEN_H)
+                            ? s_frameBuf[sy * SCREEN_W + sx] : lv_color_black();
+                    sx_fp += cs;
+                    sy_fp -= sn;
+                }
+            }
+#if (LV_COLOR_16_SWAP != 0)
+            s_gfx->draw16bitBeRGBBitmap(px1, py1, (uint16_t *)s_rotFrame, outW, outH);
+#else
+            s_gfx->draw16bitRGBBitmap(px1, py1, (uint16_t *)s_rotFrame, outW, outH);
+#endif
+            s_frameCount++;
+            s_dirtyX1 = SCREEN_W; s_dirtyY1 = SCREEN_H;
+            s_dirtyX2 = -1;       s_dirtyY2 = -1;
+        }
+        lv_disp_flush_ready(drv);
+        return;
+    }
+
     lv_color_t *out = px;
     int16_t  dx = area->x1, dy = area->y1;
     uint16_t dw = (uint16_t)w, dh = (uint16_t)h;
@@ -98,7 +190,21 @@ static void touch_read_cb(lv_indev_drv_t *drv, lv_indev_data_t *data) {
     uint16_t x, y;
     if (touch_read(&x, &y)) {
         uint16_t lx = x, ly = y;                          // map physical touch -> logical (inverse rotation)
-        switch (s_rot) {
+        if (s_rotOffset != 0) {
+            const int32_t cx = (SCREEN_W - 1) << 15;
+            const int32_t cy = (SCREEN_H - 1) << 15;
+            const int32_t dx = (x << 16) - cx;
+            const int32_t dy = (y << 16) - cy;
+            const int32_t cs = s_rotCos, sn = s_rotSin;
+            const int tx = (cx + (int32_t)(((int64_t)cs * dx + (int64_t)sn * dy) >> 16) + 32768) >> 16;
+            const int ty = (cy + (int32_t)((-(int64_t)sn * dx + (int64_t)cs * dy) >> 16) + 32768) >> 16;
+            if (tx < 0 || tx >= SCREEN_W || ty < 0 || ty >= SCREEN_H) {
+                data->state = LV_INDEV_STATE_RELEASED;
+                return;
+            }
+            lx = (uint16_t)tx;
+            ly = (uint16_t)ty;
+        } else switch (s_rot) {
             case 1: lx = y;                            ly = (uint16_t)(SCREEN_H - 1 - x); break;
             case 2: lx = (uint16_t)(SCREEN_W - 1 - x); ly = (uint16_t)(SCREEN_H - 1 - y); break;
             case 3: lx = (uint16_t)(SCREEN_W - 1 - y); ly = x;                            break;
@@ -148,6 +254,9 @@ bool begin() {
     // block the TLS handshake needs and break the ADS-B feed. NULL is fine (rotation just
     // falls back to un-rotated for 90/270° if PSRAM is exhausted).
     s_rotBuf = (lv_color_t *)heap_caps_malloc(buf_px * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+    const size_t frame_px = (size_t)SCREEN_W * SCREEN_H;
+    s_frameBuf = (lv_color_t *)heap_caps_calloc(frame_px, sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
+    s_rotFrame = (lv_color_t *)heap_caps_malloc(frame_px * sizeof(lv_color_t), MALLOC_CAP_SPIRAM);
 
     lv_disp_drv_init(&s_disp_drv);
     s_disp_drv.hor_res  = SCREEN_W;
@@ -178,10 +287,19 @@ void setBrightness(uint8_t v) { if (s_gfx) s_gfx->setBrightness(v); }
 
 void setRotation(uint8_t quarters) {
     s_rot = (uint8_t)(quarters & 3);   // 0..3 = 0°/90°/180°/270°
+    update_rotation_coefficients();
     lv_obj_t *scr = lv_scr_act();
     if (scr) lv_obj_invalidate(scr);   // full repaint in the new orientation
 }
 uint8_t rotation() { return s_rot; }
+
+void setRotationOffset(int8_t degrees) {
+    s_rotOffset = (int8_t)constrain((int)degrees, -45, 45);
+    update_rotation_coefficients();
+    lv_obj_t *scr = lv_scr_act();
+    if (scr) lv_obj_invalidate(scr);
+}
+int8_t rotationOffset() { return s_rotOffset; }
 
 uint32_t inactiveMs() { return lv_disp_get_inactive_time(NULL); }
 

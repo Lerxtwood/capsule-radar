@@ -37,7 +37,8 @@
 // altitude-trail palette so land never reads as an aircraft track.
 #define COAST_COLOR lv_color_hex(0x4E86C6)
 // airport markers — a neutral muted grey-blue so they sit quietly under the traffic.
-#define AIRPORT_COLOR lv_color_hex(0x8A93A6)
+#define AIRPORT_CROSS_COLOR lv_color_hex(0x25AFFF)
+#define AIRPORT_LABEL_COLOR lv_color_hex(0xFFFFFF)
 // ---- orb palette (Orb) ----
 #define ORB_BLIP   lv_color_hex(0xFFE11A)
 #define ORB_EMERG  lv_color_hex(0xFF4D2E)
@@ -95,6 +96,7 @@ static uint32_t    s_pollMs       = POLL_INTERVAL_MS;
 static int         s_frameCtr     = 0;
 static lv_coord_t  s_cx = SCREEN_CX, s_cy = SCREEN_CY;
 static std::string s_selHex;
+static std::set<std::string> s_prefetching;
 
 struct FlowSeg { lv_point_t a, b; uint16_t gen; };   // gen = the poll it was laid down on
 static std::deque<FlowSeg> s_flow;
@@ -209,7 +211,7 @@ static void grid_draw_cb(lv_event_t *e) {
         td.border_width = 1;
         td.border_opa = 160;
         coastline_draw(d, COAST_COLOR, 170, 2);    // landmass outline under the triangle
-        if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, 150);
+        if (s_airportsEnabled) airports_draw(d, AIRPORT_CROSS_COLOR, AIRPORT_LABEL_COLOR, 235);
         lv_draw_polygon(d, &td, tri, 3);
         return;
     }
@@ -217,7 +219,7 @@ static void grid_draw_cb(lv_event_t *e) {
     // coastline first, so the rings/crosshair sit cleanly on top of it.
     // Steel blue + 2 px so it reads as a map outline, distinct from the green altitude trails.
     coastline_draw(d, COAST_COLOR, 165, 2);
-    if (s_airportsEnabled) airports_draw(d, AIRPORT_COLOR, 150);
+    if (s_airportsEnabled) airports_draw(d, AIRPORT_CROSS_COLOR, AIRPORT_LABEL_COLOR, 235);
 
     // phosphor: concentric rings + crosshair
     lv_draw_arc_dsc_t ad;
@@ -325,6 +327,18 @@ static void interp_step(void) {
 static void sweep_timer_cb(lv_timer_t *t) {
     (void)t;
     if (++s_frameCtr % 3 == 0) interp_step();         // smooth glyph motion (~90 ms cadence)
+    static bool lastFlashOn = true;
+    const bool flashOn = ((lv_tick_get() / 250U) & 1U) == 0;
+    if (flashOn != lastFlashOn && s_acLayer && !s_prefetching.empty()) {
+        lastFlashOn = flashOn;
+        for (const AcDraw &ac : s_acs) {
+            if (!ac.inRange || !s_prefetching.count(ac.hex)) continue;
+            const lv_coord_t r = orb() ? 44 : 18;
+            lv_area_t a = { (lv_coord_t)(ac.pos.x - r), (lv_coord_t)(ac.pos.y - r),
+                            (lv_coord_t)(ac.pos.x + r), (lv_coord_t)(ac.pos.y + r) };
+            lv_obj_invalidate_area(s_acLayer, &a);
+        }
+    }
     if (orb()) {
         // animate the blip waves (invalidate only the ball areas)
         s_wavePhase += 0.05f;
@@ -438,11 +452,12 @@ static void ac_draw_cb(lv_event_t *e) {
     int balls = 0, arrows = 0;
 
     for (const AcDraw &ac : s_acs) {
+        const bool flashOff = s_prefetching.count(ac.hex) && (((lv_tick_get() / 250U) & 1U) != 0);
         if (drg) {
             if (ac.inRange) {
                 if (balls >= ORB_BLIPS) continue;   // up to 7 in-range balls
                 draw_trail(d, ac, ORB_FLOW);
-                draw_ball(d, ac);
+                if (!flashOff) draw_ball(d, ac);
                 balls++;
             } else {
                 if (arrows >= ORB_ARROWS) continue;  // up to 8 off-range arrows
@@ -465,8 +480,8 @@ static void ac_draw_cb(lv_event_t *e) {
             lv_draw_rect_dsc_init(&g);
             g.bg_color = ac.color;
             g.bg_opa = LV_OPA_COVER;
-            lv_draw_polygon(d, &g, pts, 4);
-            if (ac.emergency) {
+            if (!flashOff) lv_draw_polygon(d, &g, pts, 4);
+            if (ac.emergency && !flashOff) {
                 lv_draw_arc_dsc_t h;
                 lv_draw_arc_dsc_init(&h);
                 h.color = COL_EMERG; h.width = 2; h.opa = 200;
@@ -616,6 +631,19 @@ void setTrailLength(int level) {
     else while ((int)s_flow.size() > s_flowMax) s_flow.pop_front();
     flow_redraw_all();                              // repaint the flow canvas at the new length
     if (s_acLayer) lv_obj_invalidate(s_acLayer);
+}
+
+void setPrefetching(const char *hex, bool active) {
+    if (!hex || !hex[0]) return;
+    if (active) s_prefetching.insert(hex);
+    else        s_prefetching.erase(hex);
+    if (!s_acLayer) return;
+    for (const AcDraw &ac : s_acs) {
+        if (strcmp(ac.hex, hex) != 0) continue;
+        lv_area_t a = glyph_bbox(ac.pos);
+        lv_obj_invalidate_area(s_acLayer, &a);
+        break;
+    }
 }
 
 void init(void *lv_parent) {

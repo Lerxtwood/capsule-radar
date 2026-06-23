@@ -25,6 +25,12 @@ uint32_t inactiveMs();
 void setRotation(uint8_t quarters);
 uint8_t rotation();
 
+// Fine adjustment applied after the 90-degree rotation, in degrees (-45..45).
+// Non-zero values use a full-frame software rotation so the entire UI and touch
+// coordinates stay aligned.
+void setRotationOffset(int8_t degrees);
+int8_t rotationOffset();
+
 } // namespace display
 
 uint32_t display_frames();   // total rendered frames (for FPS measurement)

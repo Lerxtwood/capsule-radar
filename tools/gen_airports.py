@@ -3,8 +3,8 @@
 
 Keeps large airports (always) and medium airports that have an IATA code, so the
 map shows the meaningful/scheduled fields without the tens of thousands of tiny
-strips. Emits int16 lat/lon (degrees * 100), a 3-letter IATA code, and a 'large'
-flag (only large airports get a label on screen).
+strips. Emits int16 lat/lon (degrees * 100), a four-character ICAO/GPS identifier,
+and a 'large' flag (used to prioritize labels in dense areas).
 
 Usage:
     python3 tools/gen_airports.py /tmp/airports.csv src/airports_data.h
@@ -26,6 +26,7 @@ def main():
         for r in csv.DictReader(f):
             t = r["type"]
             iata = (r.get("iata_code") or "").strip().upper()[:3]
+            icao = (r.get("gps_code") or r.get("ident") or "").strip().upper()[:4]
             if t == "large_airport":
                 large = 1
             elif t == "medium_airport" and iata:
@@ -39,7 +40,7 @@ def main():
                 continue
             lat_s = max(-9000, min(9000, round(lat * SCALE)))
             lon_s = max(-18000, min(18000, round(lon * SCALE)))
-            rows.append((lat_s, lon_s, iata, large))
+            rows.append((lat_s, lon_s, icao, large))
 
     # large first isn't needed; keep file order. Stats:
     n_large = sum(1 for r in rows if r[3])
@@ -62,19 +63,19 @@ def main():
             f.write("  " + ",".join(str(r[1]) for r in rows[i:i + 18]) + ",\n")
         f.write("};\n\n")
 
-        f.write("// 1 = large airport (gets an IATA label), 0 = medium (marker only).\n")
+        f.write("// 1 = large airport (label priority), 0 = medium.\n")
         f.write("static const uint8_t AIRPORT_LARGE[AIRPORT_NUM] = {\n")
         for i in range(0, len(rows), 32):
             f.write("  " + ",".join(str(r[3]) for r in rows[i:i + 32]) + ",\n")
         f.write("};\n\n")
 
-        f.write("// 3-letter IATA code (may be empty for a large airport without one).\n")
-        f.write("static const char AIRPORT_IATA[AIRPORT_NUM][4] = {\n")
+        f.write("// ICAO/GPS identifier, falling back to the dataset ident.\n")
+        f.write("static const char AIRPORT_ICAO[AIRPORT_NUM][5] = {\n")
         for i in range(0, len(rows), 12):
             f.write("  " + ",".join('"%s"' % r[2] for r in rows[i:i + 12]) + ",\n")
         f.write("};\n")
 
-    bytes_total = len(rows) * (2 + 2 + 1 + 4)
+    bytes_total = len(rows) * (2 + 2 + 1 + 5)
     print("airports: %d (%d large, %d medium)" % (len(rows), n_large, len(rows) - n_large))
     print("flash:    ~%.1f KB" % (bytes_total / 1024.0))
     print("written:  %s" % dst)

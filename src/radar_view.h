@@ -69,5 +69,6 @@ bool sweepEnabled();
 void setAirportsEnabled(bool on);                // show/hide airport markers on the scope
 bool airportsEnabled();
 void setTrailLength(int level);                  // 0=off 1=short 2=medium 3=long (aircraft trails + flow)
+void setPrefetching(const char *hex, bool active); // flash a contact while detail data is being fetched
 
 } // namespace radar
