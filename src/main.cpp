@@ -19,6 +19,7 @@
 #include "battery.h"                 // AXP2101 battery gauge
 #include "rtc_pcf85063.h"            // PCF85063 RTC (offline clock + date)
 #include "audio.h"                   // ES8311 alert pings
+#include "tamapoke/tamapoke_app.h"   // guest pet app
 #include <set>                       // audio: track which contacts are in range
 #include <string>
 #include <WiFiManager.h>             // captive portal
@@ -47,6 +48,10 @@ static bool                  g_showSweep = true;                     // rotating
 static bool                  g_prefetchDetails = true;               // preload route/photo for new in-range aircraft
 static bool                  g_genericPhotos = true;                 // type-based Wikimedia fallback when exact photo is absent
 static int                   g_units = 0;                            // 0=Aviation 1=Metric 2=Imperial (web/NVS)
+static int                   g_appMode = 0;                          // 0=radar 1=TamaPoke (web/NVS)
+static bool                  g_tamapokeReady = false;                // guest app initialized?
+static volatile int          g_pendingAppMode = -1;                  // defer app switches out of the web handler
+static volatile bool         g_pendingAppSave = false;               // save requested for deferred app switch
 static bool                  g_showAirports = true;                  // airport markers on/off (web/NVS)
 static int                   g_rotation = 0;                         // display rotation 0/1/2/3 = 0/90/180/270 (web/NVS)
 static int                   g_rotationOffset = 0;                   // fine display rotation adjustment, degrees (web/NVS)
@@ -186,6 +191,7 @@ static void loadSettings() {
     g_trailLen         = p.getInt("traillen", 2);
     g_idleDimMs        = p.getUInt("idledim", IDLE_DIM_MS);
     g_units            = p.getInt("units", 0);
+    g_appMode          = constrain(p.getInt("app", 0), 0, 1);
     g_prefetchDetails  = p.getBool("prefetch", true);
     g_genericPhotos    = p.getBool("genericpic", true);
     g_tz               = p.getString("tz", TZ_STR);
@@ -369,6 +375,13 @@ static void handleRoot() {
         snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == g_trailLen ? " selected" : "", tlnames[i]);
         tlopts += o;
     }
+    const char *appnames[] = {"Capsule Radar", "TamaPoke"};
+    String appopts;
+    for (int i = 0; i < 2; ++i) {
+        char o[80];
+        snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == g_appMode ? " selected" : "", appnames[i]);
+        appopts += o;
+    }
     const char *anames[] = {"Off", "Emergencies only", "New aircraft + emergencies"};
     String aopts;
     for (int i = 0; i < 3; ++i) {
@@ -451,6 +464,7 @@ static void handleRoot() {
         "<label>Brightness</label>"
         "<input type=range min=5 max=255 value='%d' oninput='b(this.value,0)' onchange='b(this.value,1)'>"
         "<label>Dim screen after</label><select onchange='d(this.value)'>%s</select>"
+        "<label>Active app</label><select onchange='app(this.value)'>%s</select>"
         "<label><input type=checkbox class=ck %s onchange='sw(this.checked)'>Show radar sweep</label>"
         "<label><input type=checkbox class=ck %s onchange='pf(this.checked)'>Preload aircraft details</label>"
         "<label><input type=checkbox class=ck %s onchange='gf(this.checked)'>Use generic aircraft photos</label>"
@@ -483,6 +497,7 @@ static void handleRoot() {
         "function m(c){fetch('/vol?mute='+(c?1:0)+'&save=1')}"
         "function t(){fetch('/vol?test=1')}"
         "function d(v){fetch('/idle?v='+v+'&save=1')}"
+        "function app(v){fetch('/app?v='+v+'&save=1')}"
         "function sw(c){fetch('/sweep?v='+(c?1:0)+'&save=1')}"
         "function pf(c){fetch('/prefetch?v='+(c?1:0)+'&save=1')}"
         "function gf(c){fetch('/generic-photos?v='+(c?1:0)+'&save=1')}"
@@ -504,7 +519,8 @@ static void handleRoot() {
         "if(b>=0)e.selectedIndex=b;})();</script></body></html>",
         g_settings.homeLat, g_settings.homeLon, gpsRow.c_str(), ropts.c_str(), topts.c_str(),
         tzopts.c_str(),
-        g_brightnessDay, iopts.c_str(), g_showSweep ? "checked" : "", g_prefetchDetails ? "checked" : "",
+        g_brightnessDay, iopts.c_str(), appopts.c_str(),
+        g_showSweep ? "checked" : "", g_prefetchDetails ? "checked" : "",
         g_genericPhotos ? "checked" : "",
         g_showAirports ? "checked" : "", tlopts.c_str(), rotopts.c_str(), g_rotationOffset, uopts.c_str(),
         g_volume, g_muted ? "checked" : "", aopts.c_str(), popts.c_str(),
@@ -692,6 +708,35 @@ static void handleAirports() {   // show/hide airport markers (live)
             p.putBool("airports", g_showAirports);
             p.end();
         }
+    }
+    g_web.send(200, "text/plain", "ok");
+}
+
+static bool activateApp(int mode) {
+    mode = constrain(mode, 0, 1);
+    Serial.printf("[app] switching -> %s\n", mode == 1 ? "TamaPoke" : "Capsule Radar");
+    if (mode == 1 && !g_tamapokeReady) {
+        g_tamapokeReady = tamapoke_begin();
+        if (!g_tamapokeReady) {
+            Serial.println("[app] TamaPoke start failed");
+            return false;
+        }
+    }
+    g_appMode = mode;
+    if (g_appMode == 0) {
+        display::invalidate();   // repaint over the last TamaPoke frame
+        applyBrightness();
+    }
+    Serial.printf("[app] active -> %s\n", g_appMode == 1 ? "TamaPoke" : "Capsule Radar");
+    return true;
+}
+
+static void handleApp() {   // switch active full-screen app (live)
+    if (g_web.hasArg("v")) {
+        g_pendingAppMode = constrain((int)g_web.arg("v").toInt(), 0, 1);
+        g_pendingAppSave = g_web.hasArg("save");
+        g_web.send(200, "text/plain", "switching");
+        return;
     }
     g_web.send(200, "text/plain", "ok");
 }
@@ -891,6 +936,7 @@ void setup() {
     g_web.on("/prefetch", handlePrefetch);
     g_web.on("/generic-photos", handleGenericPhotos);
     g_web.on("/airports", handleAirports);
+    g_web.on("/app", handleApp);
     g_web.on("/trail", handleTrail);
     g_web.on("/rotate", handleRotate);
     g_web.on("/rotate-offset", handleRotateOffset);
@@ -907,13 +953,41 @@ void setup() {
         handleUpdateUpload);
     g_web.begin();
 
+    if (g_appMode != 0) {
+        // Merge-safety guard: do not auto-boot into the guest app until manual
+        // switching has proven stable. This prevents a bad guest startup from
+        // creating a reboot loop that is hard to recover from at the bench.
+        Serial.println("[app] saved TamaPoke mode ignored during merge test; staying in radar");
+        g_appMode = 0;
+    }
+
     Serial.println("setup done");
 }
 
 void loop() {
-    display::loop();                // drive LVGL (render dirty areas + run timers)
+    if (g_appMode == 0) display::loop();  // drive LVGL (render dirty areas + run timers)
+    else                tamapoke_loop();  // guest app owns direct full-screen drawing
     g_wm.process();                 // service the WiFi config portal (non-blocking)
     g_web.handleClient();           // serve the configuration web page
+
+    if (g_pendingAppMode >= 0) {
+        const int mode = constrain((int)g_pendingAppMode, 0, 1);
+        const bool save = g_pendingAppSave;
+        g_pendingAppMode = -1;
+        g_pendingAppSave = false;
+
+        const bool ok = activateApp(mode);
+        if (ok && save) {
+            Preferences p;
+            p.begin("capsuleradar", false);
+            // For now only persist radar mode. Once TamaPoke switching is stable,
+            // we can allow app=1 to persist too.
+            p.putInt("app", 0);
+            p.end();
+            if (mode == 1) Serial.println("[app] TamaPoke persistence deferred until stable");
+        }
+    }
+
     if (g_useGps) gps_poll();       // pull NMEA from the LC76G (only when GPS auto-location is on)
 
     // scheduled reboot after a fresh WiFi config (see setSaveConfigCallback)
@@ -931,7 +1005,7 @@ void loop() {
     if (otaUp) ArduinoOTA.handle();
 
     // Push a fresh ADS-B snapshot to the radar (copy under the mutex, render outside).
-    if (g_acDirty) {
+    if (g_appMode == 0 && g_acDirty) {
         if (xSemaphoreTake(g_ac_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
             g_snap.swap(g_aircraft);   // O(1) handoff under the lock; render on g_snap outside it.
             g_acDirty = false;         // g_aircraft now holds the previous snapshot (overwritten next poll)
@@ -941,7 +1015,7 @@ void loop() {
             checkAudioEvents();                // ping new-in-range / emergency / military
         }
     }
-    updatePrefetchIndicators();
+    if (g_appMode == 0) updatePrefetchIndicators();
 
     // periodic: HUD clock + wifi/battery indicators
     static uint32_t lastStatus = 0;
@@ -973,19 +1047,19 @@ void loop() {
         // polls intermittently) that never trips the consecutive-fail counter -> aircraft
         // freeze but the icon would otherwise stay white.
         const bool feedFresh = wifiUp && (millis() - g_lastFeedOkMs < 18000UL);
-        ui_set_status(wifiUp, feedFresh, rssi, clk);
+        if (g_appMode == 0) ui_set_status(wifiUp, feedFresh, rssi, clk);
         char net[80];
         if (WiFi.status() == WL_CONNECTED)
             snprintf(net, sizeof(net), "Configure at\ncapsuleradar.local\n%s", WiFi.localIP().toString().c_str());
         else
             snprintf(net, sizeof(net), "WiFi setup:\njoin CapsuleRadar-Setup");
-        ui_set_netinfo(net);
+        if (g_appMode == 0) ui_set_netinfo(net);
         const bool bpresent = battery_present();
-        ui_set_battery(battery_percent(), battery_charging(), bpresent);
+        if (g_appMode == 0) ui_set_battery(battery_percent(), battery_charging(), bpresent);
         g_onBattery = bpresent && !battery_charging();
         // GPS HUD/Stats: 0 = off/no module (hidden), 1 = acquiring, 2 = fix
         const int gpsState = (!g_useGps || !gps_present()) ? 0 : (gps_has_fix() ? 2 : 1);
-        ui_set_gps(gpsState, gps_satellites());
+        if (g_appMode == 0) ui_set_gps(gpsState, gps_satellites());
         // once NTP has a real fix, persist it to the RTC (core 1 only)
         if (!g_rtcSynced && time(nullptr) > 1700000000L) {
             time_t now = time(nullptr);
@@ -1011,7 +1085,7 @@ void loop() {
     // face-down -> screen off (IMU); flip face-up to wake
     static uint32_t lastImu = 0;
     static int fdCount = 0;
-    if (millis() - lastImu > 400) {
+    if (g_appMode == 0 && millis() - lastImu > 400) {
         lastImu = millis();
         const int fd = imu_facedown();              // 1 down, 0 not, -1 read error
         if (fd > 0)       { if (fdCount < 8) fdCount++; }
