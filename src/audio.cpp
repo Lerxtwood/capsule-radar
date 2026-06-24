@@ -146,6 +146,16 @@ static size_t gen_beep(int16_t *buf, size_t cap, float freq, int ms, float amp) 
     return i * 2;                                  // samples written (stereo interleaved)
 }
 
+static void write_tone(float freq, int ms, float ampScale) {
+    if (!s_buf) return;
+    size_t bw;
+    const float amp = (s_vol / 100.0f) * 17000.0f * ampScale;
+    const size_t ns = gen_beep(s_buf, S_BUF_LEN, freq, ms, amp);
+    i2s_write(I2S_PORT, s_buf, ns * 2, &bw, portMAX_DELAY);
+}
+
+static void rest_ms(int ms) { delay(ms); }
+
 static void play_cue(int cue) {
     if (!s_ok || !s_buf || (s_muted && cue != 2) || s_vol <= 0) return;
     int16_t *buf = s_buf;
@@ -162,9 +172,29 @@ static void play_cue(int cue) {
             i2s_write(I2S_PORT, buf, ns * 2, &bw, portMAX_DELAY);
             delay(40);
         }
-    } else {
+    } else if (cue == AUDIO_NEW) {
         size_t ns = gen_beep(buf, S_BUF_LEN, 880.0f, 160, amp);
         i2s_write(I2S_PORT, buf, ns * 2, &bw, portMAX_DELAY);
+    } else if (cue == AUDIO_TAMA_TAP) {
+        write_tone(1320.0f, 35, 0.45f);
+    } else if (cue == AUDIO_TAMA_EAT) {
+        write_tone(720.0f, 45, 0.45f); rest_ms(22); write_tone(900.0f, 45, 0.42f);
+    } else if (cue == AUDIO_TAMA_PLAY) {
+        write_tone(980.0f, 38, 0.45f); rest_ms(18); write_tone(1240.0f, 38, 0.42f);
+    } else if (cue == AUDIO_TAMA_HEART) {
+        write_tone(880.0f, 55, 0.42f); rest_ms(25); write_tone(1175.0f, 70, 0.40f);
+    } else if (cue == AUDIO_TAMA_HATCH) {
+        write_tone(660.0f, 70, 0.48f); rest_ms(35); write_tone(990.0f, 80, 0.45f); rest_ms(35); write_tone(1320.0f, 100, 0.42f);
+    } else if (cue == AUDIO_TAMA_EVOLVE) {
+        write_tone(740.0f, 70, 0.45f); rest_ms(20); write_tone(932.0f, 70, 0.43f); rest_ms(20); write_tone(1175.0f, 90, 0.40f);
+    } else if (cue == AUDIO_TAMA_MEDAL) {
+        write_tone(1047.0f, 55, 0.45f); rest_ms(22); write_tone(1319.0f, 55, 0.43f); rest_ms(22); write_tone(1568.0f, 90, 0.40f);
+    } else if (cue == AUDIO_TAMA_DENY) {
+        write_tone(440.0f, 75, 0.38f); rest_ms(28); write_tone(330.0f, 95, 0.36f);
+    } else if (cue == AUDIO_TAMA_BYE) {
+        write_tone(784.0f, 75, 0.38f); rest_ms(35); write_tone(659.0f, 95, 0.34f); rest_ms(35); write_tone(523.0f, 120, 0.30f);
+    } else if (cue == AUDIO_TAMA_LEVEL) {
+        write_tone(784.0f, 55, 0.42f); rest_ms(18); write_tone(988.0f, 55, 0.40f); rest_ms(18); write_tone(1175.0f, 70, 0.38f);
     }
     delay(90);                                     // let the DMA clock the tail out before cutting the amp
     digitalWrite(PIN_AUDIO_PA, LOW);               // mute amp between pings (saves power, kills hiss)

@@ -298,9 +298,9 @@ bool tamapoke_begin() {
                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
                 (unsigned)ESP.getFreePsram());
 
-  // Audio is owned by Capsule Radar in the combined firmware. TamaPoke SFX are
-  // kept muted for now to avoid a second I2S driver fighting the stable radar audio path.
-  // audioBegin();  // ES8311 + I2S + amplificador (suena un jingle de arranque)
+  // Audio is owned by Capsule Radar in the combined firmware. This shim only
+  // loads TamaPoke's sound toggle and routes SFX to the shared radar audio task.
+  audioBegin();
 
   lastInteract = millis();
   return true;

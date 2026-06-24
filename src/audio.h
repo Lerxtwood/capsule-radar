@@ -7,8 +7,18 @@
 #include <stdbool.h>
 
 enum AudioCue {
-    AUDIO_NEW   = 0,   // new aircraft entered range (soft single beep)
-    AUDIO_ALERT = 1,   // emergency / military contact (urgent double beep)
+    AUDIO_NEW          = 0,   // new aircraft entered range (soft single beep)
+    AUDIO_ALERT        = 1,   // emergency / military contact (urgent double beep)
+    AUDIO_TAMA_TAP     = 10,
+    AUDIO_TAMA_EAT,
+    AUDIO_TAMA_PLAY,
+    AUDIO_TAMA_HEART,
+    AUDIO_TAMA_HATCH,
+    AUDIO_TAMA_EVOLVE,
+    AUDIO_TAMA_MEDAL,
+    AUDIO_TAMA_DENY,
+    AUDIO_TAMA_BYE,
+    AUDIO_TAMA_LEVEL,
 };
 
 bool audio_begin();                 // init ES8311 + I2S + PA + playback task (call on core 1)
