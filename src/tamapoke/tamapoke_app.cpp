@@ -127,6 +127,7 @@ static const uint16_t STARS[][2] = { {120,140},{330,120},{370,210},{95,230},{280
 
 bool wasPressed = false;
 static volatile bool gRequestRadarApp = false;
+static uint8_t gTamaRotation = 0;
 // eleccion de inicial (primera partida): Bulbasaur / Charmander / Squirtle, 3 filas
 static const int16_t STARTER_DEX[3] = { 1, 4, 7 };
 #define STARTER_ROW_Y 110
@@ -156,6 +157,7 @@ uint32_t confirmUntil = 0;  // dialogo "soltar?" activo hasta este millis
 uint8_t choiceKind = 0;     // dialogo de decision: 0 ninguno, 1 evolucion, 2 despedida
 uint32_t choiceUntil = 0;   // se cierra solo a este millis
 int16_t tX0, tY0, tXl, tYl; // gesto en curso (inicio y ultima posicion)
+int16_t tPhysX0, tPhysY0, tPhysXl, tPhysYl; // gesto fisico, para el escape hatch
 uint32_t tStart = 0;
 bool holdFired = false;
 
@@ -270,6 +272,7 @@ bool tamapoke_begin() {
                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL),
                   (unsigned)ESP.getFreePsram());
   }
+  gfx->setRotation(gTamaRotation);
   display::setBrightness(180);
 
   Serial.println("[tamapoke] pet begin");
@@ -384,6 +387,13 @@ void tamapoke_loop() {
     lastRender = now;
     render();
   }
+}
+
+void tamapoke_set_rotation(uint8_t quarters) {
+  gTamaRotation = quarters & 3;
+  if (gfx) gfx->setRotation(gTamaRotation);
+  lastRender = 0;  // force a fresh full-frame draw with the new orientation
+  Serial.printf("[tamapoke] rotation -> %u\n", (unsigned)gTamaRotation);
 }
 
 bool tamapoke_consume_radar_request() {
@@ -532,7 +542,14 @@ void handleTouch() {
   gTouchIrq = false;
   uint16_t rx = 0, ry = 0;
   bool pressed = touch_read(&rx, &ry);
-  int16_t x = (int16_t)rx, y = (int16_t)ry;
+  int16_t physX = (int16_t)rx, physY = (int16_t)ry;
+  int16_t x = physX, y = physY;
+  switch (gTamaRotation & 3) {
+    case 1: x = physY; y = LCD_HEIGHT - 1 - physX; break;
+    case 2: x = LCD_WIDTH - 1 - physX; y = LCD_HEIGHT - 1 - physY; break;
+    case 3: x = LCD_WIDTH - 1 - physY; y = physX; break;
+    default: break;
+  }
 
   // saco de entrenamiento: cada toque cuenta al instante (aporrear rapido)
   if (sackOpen) {
@@ -548,6 +565,8 @@ void handleTouch() {
   if (pressed && !wasPressed) {  // empieza el gesto
     tX0 = tXl = x;
     tY0 = tYl = y;
+    tPhysX0 = tPhysXl = physX;
+    tPhysY0 = tPhysYl = physY;
     tStart = millis();
     holdFired = false;
     swallowGesture = (dimStage > 0) || screenOff;  // si estaba a oscuras, solo despierta
@@ -556,7 +575,9 @@ void handleTouch() {
   } else if (pressed) {  // sigue apoyado
     tXl = x;
     tYl = y;
-    // Combined-firmware escape hatch: hold the top-center of the round display to return to
+    tPhysXl = physX;
+    tPhysYl = physY;
+    // Combined-firmware escape hatch: hold the top-center of the TamaPoke view to return to
     // Capsule Radar, even when TamaPoke is the saved boot app and the radar
     // config hint is not visible on-screen.
     if (!holdFired && !swallowGesture && millis() - tStart > 1800 &&

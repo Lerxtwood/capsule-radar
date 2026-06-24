@@ -49,6 +49,7 @@ static bool                  g_prefetchDetails = true;               // preload 
 static bool                  g_genericPhotos = true;                 // type-based Wikimedia fallback when exact photo is absent
 static int                   g_units = 0;                            // 0=Aviation 1=Metric 2=Imperial (web/NVS)
 static int                   g_appMode = 0;                          // 0=radar 1=TamaPoke (web/NVS)
+static int                   g_tamapokeRotation = 0;                 // TamaPoke rotation 0/1/2/3 = 0/90/180/270
 static bool                  g_tamapokeReady = false;                // guest app initialized?
 static volatile int          g_pendingAppMode = -1;                  // defer app switches out of the web handler
 static volatile bool         g_pendingAppSave = false;               // save requested for deferred app switch
@@ -201,6 +202,7 @@ static void loadSettings() {
     Preferences appp;
     appp.begin("cr_app", true);
     g_appMode = constrain(appp.getInt("mode", -1), -1, 1);
+    g_tamapokeRotation = constrain(appp.getInt("rot", 0), 0, 3);
     const bool appBootGuard = appp.getBool("bootguard", false);
     appp.end();
     if (g_appMode < 0) {
@@ -284,6 +286,7 @@ static void updatePrefetchIndicators() {
 
 // Double-tap zoom: change the display range, persist it, and ask adsb_task to
 // re-query at a matching radius (safely, on its own core). Re-render immediately.
+static void persistAppMode(int mode);
 static void onRangeChange(float km) {
     g_settings.rangeKm = km;
     Preferences p;
@@ -295,6 +298,13 @@ static void onRangeChange(float km) {
     radar::update(g_snap, g_settings);   // instant visual zoom from the last snapshot
     ui_set_range_km(km);
     ui_on_data_updated();
+}
+
+static void requestTamapokeFromRadar() {
+    Serial.println("[app] radar top-center gesture -> TamaPoke");
+    persistAppMode(1);
+    g_pendingAppMode = 1;
+    g_pendingAppSave = true;
 }
 
 // Persist the visual theme in NVS (called when the user long-presses to switch).
@@ -463,9 +473,13 @@ static void handleRoot() {
         ".ft{color:#5f7a6c;font-size:12px;text-align:center;margin-top:6px}.ft code{color:#9affc8}"
         ".ck{width:auto;display:inline;margin-right:8px;vertical-align:middle}"
         ".sec{background:#0c1a12!important;color:#1dff86!important;border:1px solid #2a4a39!important}"
+        ".nav{display:flex;gap:8px;margin:-4px 0 14px}.nav a{flex:1;text-align:center;text-decoration:none;"
+        "padding:9px 8px;border:1px solid #2a4a39;border-radius:9px;color:#9affc8;background:#0c1a12}"
+        ".nav a.on{background:#1dff86;color:#04140b;border-color:#1dff86;font-weight:700}"
         "#map{height:220px;border-radius:10px;margin:6px 0 8px;border:1px solid #2a4a39;z-index:0}"
         "</style></head><body>"
         "<div class=hd><div class=dot></div><div><h1>Capsule Radar</h1><p class=sub>Live ADS-B radar &middot; configuration</p></div></div>"
+        "<nav class=nav><a class=on href=/>Capsule-Radar</a><a href=/tamapoke>TamaPoke</a><a href=/update>Firmware</a></nav>"
         "<div class=card><div class=t>Location &amp; range</div><form method=POST action=/save>"
         "<label>Center point &mdash; tap the map or drag the pin</label>"
         "<div id=map></div>"
@@ -499,7 +513,7 @@ static void handleRoot() {
         "<div class=card><div class=t>Network</div>"
         "<p style='color:#9affc8;font-size:13px;margin:0 0 4px'>Forget the saved WiFi and reopen the setup portal.</p>"
         "<form method=POST action=/wifi><button class=w>Reset WiFi</button></form></div>"
-        "<p class=ft>Reach me at <code>capsuleradar.local</code> &middot; <a href=/update style='color:#9affc8'>Firmware update</a> &middot; v" FW_VERSION "</p>"
+        "<p class=ft>Reach me at <code>capsuleradar.local</code> &middot; v" FW_VERSION "</p>"
         "<script>"
         "var C=[%.5f,%.5f];var MAP=L.map('map').setView(C,10);"
         "L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'(c) OpenStreetMap'}).addTo(MAP);"
@@ -738,6 +752,7 @@ static bool activateApp(int mode) {
             return false;
         }
     }
+    if (mode == 1) tamapoke_set_rotation((uint8_t)g_tamapokeRotation);
     g_appMode = mode;
     if (g_appMode == 0) {
         display::invalidate();   // repaint over the last TamaPoke frame
@@ -837,6 +852,65 @@ static void handleGps() {   // auto-set the centre point from the LC76G GPS (-G 
     g_web.send(200, "text/plain", "ok");
 }
 
+static void handleTamapokePage() {
+    const char *rnames[] = {"0\xc2\xb0 (default)", "90\xc2\xb0", "180\xc2\xb0", "270\xc2\xb0"};
+    String ropts;
+    for (int i = 0; i < 4; ++i) {
+        char o[64];
+        snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == g_tamapokeRotation ? " selected" : "", rnames[i]);
+        ropts += o;
+    }
+    static const size_t BUFSZ = 4096;
+    static char *buf = (char *)ps_malloc(BUFSZ);
+    if (!buf) return;
+    snprintf(buf, BUFSZ,
+        "<!DOCTYPE html><html><head><meta charset=utf-8>"
+        "<meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<title>TamaPoke Settings</title><style>"
+        "*{box-sizing:border-box}"
+        "body{background:radial-gradient(circle at 50%% -10%%,#1f1530,#090611 70%%);color:#ddd6e8;"
+        "font-family:system-ui,-apple-system,sans-serif;margin:0 auto;padding:20px;max-width:480px;min-height:100vh}"
+        ".hd{display:flex;align-items:center;gap:12px;margin-bottom:16px}"
+        ".dot{width:44px;height:44px;border-radius:50%%;border:2px solid #ff7ad9;box-shadow:0 0 16px rgba(255,122,217,.4);"
+        "background:radial-gradient(circle at 35%% 35%%,#fff,#ff7ad9 35%%,#673ab7 68%%,#1b1028)}"
+        "h1{color:#ff7ad9;font-size:20px;margin:0}.sub{color:#9b83b5;font-size:12px;margin:2px 0 0}"
+        ".nav{display:flex;gap:8px;margin:-4px 0 14px}.nav a{flex:1;text-align:center;text-decoration:none;"
+        "padding:9px 8px;border:1px solid #45345a;border-radius:9px;color:#e8b8ff;background:#130d1c}"
+        ".nav a.on{background:#ff7ad9;color:#16081a;border-color:#ff7ad9;font-weight:700}"
+        ".card{background:rgba(18,10,28,.88);border:1px solid #45345a;border-radius:14px;padding:16px;margin-bottom:14px}"
+        ".t{color:#ff7ad9;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:10px;opacity:.9}"
+        "label{display:block;margin:12px 0 4px;color:#e8b8ff;font-size:13px}"
+        "select{width:100%%;box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid #45345a;background:#130d1c;color:#fff;font-size:16px}"
+        ".note{color:#bca8cc;font-size:12px;line-height:1.35;margin:8px 0 0}"
+        ".ft{color:#8b7898;font-size:12px;text-align:center;margin-top:6px}.ft code{color:#e8b8ff}"
+        "</style></head><body>"
+        "<div class=hd><div class=dot></div><div><h1>TamaPoke</h1><p class=sub>Pet app settings</p></div></div>"
+        "<nav class=nav><a href=/>Capsule-Radar</a><a class=on href=/tamapoke>TamaPoke</a><a href=/update>Firmware</a></nav>"
+        "<div class=card><div class=t>Display</div>"
+        "<label>TamaPoke screen rotation</label><select onchange='tr(this.value)'>%s</select>"
+        "<p class=note>This setting is saved now; the next step is wiring it into TamaPoke rendering and touch mapping.</p>"
+        "<p class=note>Escape hatch: hold the top-center of the TamaPoke screen for about 2 seconds to return to Capsule Radar.</p>"
+        "</div><p class=ft>Reach me at <code>capsuleradar.local</code> &middot; v" FW_VERSION "</p>"
+        "<script>function tr(v){fetch('/tamapoke/rotate?v='+v+'&save=1')}</script></body></html>",
+        ropts.c_str());
+    g_web.send(200, "text/html", buf);
+}
+
+static void handleTamapokeRotate() {
+    if (g_web.hasArg("v")) {
+        g_tamapokeRotation = constrain((int)g_web.arg("v").toInt(), 0, 3);
+        if (g_web.hasArg("save")) {
+            Preferences p;
+            p.begin("cr_app", false);
+            p.putInt("rot", g_tamapokeRotation);
+            p.end();
+        }
+        if (g_appMode == 1) tamapoke_set_rotation((uint8_t)g_tamapokeRotation);
+        Serial.printf("[tamapoke] saved rotation -> %d\n", g_tamapokeRotation);
+    }
+    g_web.send(200, "text/plain", "ok");
+}
+
 // ---- browser OTA: upload an app .bin over WiFi and self-flash ----
 static void handleUpdatePage() {
     g_web.send(200, "text/html",
@@ -846,19 +920,23 @@ static void handleUpdatePage() {
         "body{background:radial-gradient(circle at 50% -10%,#0a1f15,#04100a 70%);color:#cdd6d1;"
         "font-family:system-ui,sans-serif;margin:0 auto;padding:20px;max-width:480px;min-height:100vh}"
         "h1{color:#1dff86;font-size:20px}.card{background:rgba(10,20,14,.85);border:1px solid #1f3a2b;border-radius:14px;padding:16px}"
+        ".nav{display:flex;gap:8px;margin:0 0 14px}.nav a{flex:1;text-align:center;text-decoration:none;"
+        "padding:9px 8px;border:1px solid #2a4a39;border-radius:9px;color:#9affc8;background:#0c1a12}"
+        ".nav a.on{background:#1dff86;color:#04140b;border-color:#1dff86;font-weight:700}"
         "input,button{width:100%;box-sizing:border-box;padding:11px;border-radius:8px;margin-top:8px;font-size:16px}"
         "input{background:#0c1a12;color:#eafff3;border:1px solid #2a4a39}"
         "button{border:0;background:#1dff86;color:#04140b;font-weight:700}"
         "#bar{height:12px;background:#0c1a12;border-radius:6px;overflow:hidden;margin-top:14px;display:none}"
         "#fill{height:100%;width:0;background:#1dff86;transition:width .2s}#msg{margin-top:10px;color:#9affc8;font-size:13px}"
         "a{color:#1dff86}p{color:#9affc8;font-size:13px}"
-        "</style></head><body><h1>Firmware update (OTA)</h1><div class=card>"
+        "</style></head><body><h1>Firmware update (OTA)</h1>"
+        "<nav class=nav><a href=/>Capsule-Radar</a><a href=/tamapoke>TamaPoke</a><a class=on href=/update>Firmware</a></nav>"
+        "<div class=card>"
         "<p>Upload the <b>app firmware</b> <code>CapsuleRadar-ota.bin</code> from the GitHub release. "
         "Do NOT use the merged flash image here.</p>"
         "<input type=file id=f accept='.bin'>"
         "<button onclick=u()>Update over WiFi</button>"
         "<div id=bar><div id=fill></div></div><div id=msg></div></div>"
-        "<p style='text-align:center;margin-top:14px'><a href=/>&larr; Back to settings</a></p>"
         "<script>function u(){var f=document.getElementById('f').files[0];if(!f){return}"
         "var x=new XMLHttpRequest(),fd=new FormData();fd.append('f',f);"
         "document.getElementById('bar').style.display='block';"
@@ -921,6 +999,7 @@ void setup() {
     }
     radar::setThemeChangedCb(saveTheme);
     ui_set_range_cb(onRangeChange);              // on-screen zoom button
+    ui_set_app_switch_cb(requestTamapokeFromRadar); // top-center hold switches to TamaPoke
     ui_set_units(g_units);                       // apply saved unit preset
     ui_set_range_km(g_settings.rangeKm);         // show the loaded range
 
@@ -997,6 +1076,8 @@ void setup() {
     g_web.on("/rotate-offset", handleRotateOffset);
     g_web.on("/gps", handleGps);
     g_web.on("/units", handleUnits);
+    g_web.on("/tamapoke", HTTP_GET, handleTamapokePage);
+    g_web.on("/tamapoke/rotate", handleTamapokeRotate);
     g_web.on("/update", HTTP_GET, handleUpdatePage);
     g_web.on("/update", HTTP_POST,
         []() {

@@ -5,4 +5,5 @@
 // game loop while selected.
 bool tamapoke_begin();
 void tamapoke_loop();
+void tamapoke_set_rotation(uint8_t quarters);
 bool tamapoke_consume_radar_request();
