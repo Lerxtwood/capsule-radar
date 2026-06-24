@@ -970,27 +970,38 @@ static bool fetchRemoteUpdateManifest(String &manifest, String &error) {
         error = "WiFi is not connected.";
         return false;
     }
+    g_firmwareUpdateInProgress = true;   // pause ADS-B/route/photo TLS work while GitHub TLS connects
+    delay(250);
     WiFiClientSecure client;
     client.setInsecure();
     HTTPClient http;
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    http.setReuse(false);
+    http.useHTTP10(true);
     http.setTimeout(15000);
     if (!http.begin(client, RELEASE_MANIFEST_URL)) {
         error = "Could not open release manifest URL.";
+        g_firmwareUpdateInProgress = false;
         return false;
     }
+    http.addHeader("User-Agent", "CapsuleRadar/" FW_VERSION " ESP32-S3 OTA");
     const int code = http.GET();
     if (code != HTTP_CODE_OK) {
-        error = "Manifest request failed with HTTP " + String(code) + ".";
+        error = "Manifest request failed with HTTP " + String(code) + " (" + http.errorToString(code) +
+                "), heap=" + String((unsigned)ESP.getFreeHeap()) +
+                " largest=" + String((unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)) + ".";
         http.end();
+        g_firmwareUpdateInProgress = false;
         return false;
     }
     manifest = http.getString();
     http.end();
     if (manifest.length() == 0) {
         error = "Manifest was empty.";
+        g_firmwareUpdateInProgress = false;
         return false;
     }
+    g_firmwareUpdateInProgress = false;
     return true;
 }
 
@@ -1056,15 +1067,18 @@ static bool installRemoteFirmware(const String &firmwareUrl, const String &expec
     client.setInsecure();
     HTTPClient http;
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    http.setReuse(false);
+    http.useHTTP10(true);
     http.setTimeout(20000);
     if (!http.begin(client, firmwareUrl)) {
         error = "Could not open firmware URL.";
         g_firmwareUpdateInProgress = false;
         return false;
     }
+    http.addHeader("User-Agent", "CapsuleRadar/" FW_VERSION " ESP32-S3 OTA");
     const int code = http.GET();
     if (code != HTTP_CODE_OK) {
-        error = "Firmware download failed with HTTP " + String(code) + ".";
+        error = "Firmware download failed with HTTP " + String(code) + " (" + http.errorToString(code) + ").";
         http.end();
         g_firmwareUpdateInProgress = false;
         return false;
