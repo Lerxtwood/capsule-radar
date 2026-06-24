@@ -5,4 +5,4 @@
 // game loop while selected.
 bool tamapoke_begin();
 void tamapoke_loop();
-
+bool tamapoke_consume_radar_request();

@@ -52,6 +52,8 @@ static int                   g_appMode = 0;                          // 0=radar 
 static bool                  g_tamapokeReady = false;                // guest app initialized?
 static volatile int          g_pendingAppMode = -1;                  // defer app switches out of the web handler
 static volatile bool         g_pendingAppSave = false;               // save requested for deferred app switch
+static bool                  g_tamapokeBootGuard = false;            // saved guest app boot is still proving itself
+static uint32_t              g_tamapokeBootGuardUntilMs = 0;
 static bool                  g_showAirports = true;                  // airport markers on/off (web/NVS)
 static int                   g_rotation = 0;                         // display rotation 0/1/2/3 = 0/90/180/270 (web/NVS)
 static int                   g_rotationOffset = 0;                   // fine display rotation adjustment, degrees (web/NVS)
@@ -191,11 +193,25 @@ static void loadSettings() {
     g_trailLen         = p.getInt("traillen", 2);
     g_idleDimMs        = p.getUInt("idledim", IDLE_DIM_MS);
     g_units            = p.getInt("units", 0);
-    g_appMode          = constrain(p.getInt("app", 0), 0, 1);
     g_prefetchDetails  = p.getBool("prefetch", true);
     g_genericPhotos    = p.getBool("genericpic", true);
     g_tz               = p.getString("tz", TZ_STR);
     p.end();
+
+    Preferences appp;
+    appp.begin("cr_app", true);
+    g_appMode = constrain(appp.getInt("mode", -1), -1, 1);
+    const bool appBootGuard = appp.getBool("bootguard", false);
+    appp.end();
+    if (g_appMode < 0) {
+        // One-time compatibility fallback from the earlier merge-test builds.
+        p.begin("capsuleradar", true);
+        g_appMode = constrain(p.getInt("app", 0), 0, 1);
+        p.end();
+    }
+    Serial.printf("[app] loaded preference -> %s (bootGuard=%d)\n",
+                  g_appMode == 1 ? "TamaPoke" : "Capsule Radar",
+                  appBootGuard ? 1 : 0);
 }
 
 // Audio alerts. g_alertMode: 0 = off, 1 = emergencies only, 2 = new aircraft + emergencies.
@@ -731,11 +747,50 @@ static bool activateApp(int mode) {
     return true;
 }
 
+static void persistAppMode(int mode) {
+    mode = constrain(mode, 0, 1);
+    Preferences p;
+    if (!p.begin("cr_app", false)) {
+        Serial.println("[app] save failed: Preferences.begin(cr_app) failed");
+        return;
+    }
+    const size_t wroteMode = p.putInt("mode", mode);
+    const size_t wroteGuard = p.putBool("bootguard", false);
+    p.end();
+    Serial.printf("[app] saved preference -> %s (modeBytes=%u guardBytes=%u)\n",
+                  mode == 1 ? "TamaPoke" : "Capsule Radar",
+                  (unsigned)wroteMode, (unsigned)wroteGuard);
+}
+
+static bool appBootGuardWasSet() {
+    Preferences p;
+    if (!p.begin("cr_app", true)) return false;
+    const bool wasSet = p.getBool("bootguard", false);
+    p.end();
+    return wasSet;
+}
+
+static void setAppBootGuard(bool active) {
+    Preferences p;
+    if (!p.begin("cr_app", false)) {
+        Serial.println("[app] boot guard save failed: Preferences.begin(cr_app) failed");
+        return;
+    }
+    const size_t wrote = p.putBool("bootguard", active);
+    p.end();
+    Serial.printf("[app] boot guard -> %d (bytes=%u)\n", active ? 1 : 0, (unsigned)wrote);
+}
+
 static void handleApp() {   // switch active full-screen app (live)
     if (g_web.hasArg("v")) {
-        g_pendingAppMode = constrain((int)g_web.arg("v").toInt(), 0, 1);
-        g_pendingAppSave = g_web.hasArg("save");
-        g_web.send(200, "text/plain", "switching");
+        const int mode = constrain((int)g_web.arg("v").toInt(), 0, 1);
+        // Active app is a durable preference. Persist every explicit switch so
+        // stale/cached config pages or missing query args cannot make the UI
+        // appear to switch while leaving the next boot on radar.
+        persistAppMode(mode);
+        g_pendingAppMode = mode;
+        g_pendingAppSave = true;
+        g_web.send(200, "text/plain", mode == 1 ? "switching TamaPoke" : "switching Capsule Radar");
         return;
     }
     g_web.send(200, "text/plain", "ok");
@@ -954,11 +1009,23 @@ void setup() {
     g_web.begin();
 
     if (g_appMode != 0) {
-        // Merge-safety guard: do not auto-boot into the guest app until manual
-        // switching has proven stable. This prevents a bad guest startup from
-        // creating a reboot loop that is hard to recover from at the bench.
-        Serial.println("[app] saved TamaPoke mode ignored during merge test; staying in radar");
-        g_appMode = 0;
+        if (appBootGuardWasSet()) {
+            Serial.println("[app] previous TamaPoke boot did not confirm; falling back to radar");
+            persistAppMode(0);
+            g_appMode = 0;
+        } else {
+            Serial.println("[app] saved TamaPoke mode found; starting with boot guard");
+            setAppBootGuard(true);
+            if (activateApp(g_appMode)) {
+                g_tamapokeBootGuard = true;
+                g_tamapokeBootGuardUntilMs = millis() + 15000;
+            } else {
+                Serial.println("[app] saved TamaPoke mode failed; staying in radar");
+                persistAppMode(0);
+                g_appMode = 0;
+                display::invalidate();
+            }
+        }
     }
 
     Serial.println("setup done");
@@ -970,6 +1037,11 @@ void loop() {
     g_wm.process();                 // service the WiFi config portal (non-blocking)
     g_web.handleClient();           // serve the configuration web page
 
+    if (g_appMode == 1 && tamapoke_consume_radar_request()) {
+        persistAppMode(0);
+        activateApp(0);
+    }
+
     if (g_pendingAppMode >= 0) {
         const int mode = constrain((int)g_pendingAppMode, 0, 1);
         const bool save = g_pendingAppSave;
@@ -977,15 +1049,18 @@ void loop() {
         g_pendingAppSave = false;
 
         const bool ok = activateApp(mode);
-        if (ok && save) {
-            Preferences p;
-            p.begin("capsuleradar", false);
-            // For now only persist radar mode. Once TamaPoke switching is stable,
-            // we can allow app=1 to persist too.
-            p.putInt("app", 0);
-            p.end();
-            if (mode == 1) Serial.println("[app] TamaPoke persistence deferred until stable");
+        if (!ok && save) {
+            persistAppMode(0);
+        } else if (ok && save) {
+            persistAppMode(mode);
+            Serial.printf("[app] persisted -> %s\n", mode == 1 ? "TamaPoke" : "Capsule Radar");
         }
+    }
+
+    if (g_tamapokeBootGuard && (int32_t)(millis() - g_tamapokeBootGuardUntilMs) >= 0) {
+        g_tamapokeBootGuard = false;
+        setAppBootGuard(false);
+        Serial.println("[app] TamaPoke boot confirmed");
     }
 
     if (g_useGps) gps_poll();       // pull NMEA from the LC76G (only when GPS auto-location is on)

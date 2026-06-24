@@ -10,7 +10,7 @@
 #include <string.h>
 #include <time.h>   // route-cache TTL
 
-#define ROUTE_CACHE_MAX 200   // wrap the cache before it can crowd NVS
+#define ROUTE_CACHE_MAX 40    // keep NVS roomy for durable settings/app selection
 
 // strip spaces -> a valid NVS key (callsigns are <= 8 chars)
 static void route_key(const char *callsign, char *out, size_t on) {
@@ -20,7 +20,7 @@ static void route_key(const char *callsign, char *out, size_t on) {
     out[j] = 0;
 }
 
-#define ROUTE_FMT_VER 2   // bump to invalidate cached routes when the label format changes
+#define ROUTE_FMT_VER 3   // bump to invalidate cached routes when storage policy changes
 
 void route_cache_begin() {
     Preferences p;

@@ -126,6 +126,7 @@ static const uint8_t CRACK2[][2] = { {11,13},{12,14},{11,15},{20,12},{19,13},{20
 static const uint16_t STARS[][2] = { {120,140},{330,120},{370,210},{95,230},{280,90},{160,95} };
 
 bool wasPressed = false;
+static volatile bool gRequestRadarApp = false;
 // eleccion de inicial (primera partida): Bulbasaur / Charmander / Squirtle, 3 filas
 static const int16_t STARTER_DEX[3] = { 1, 4, 7 };
 #define STARTER_ROW_Y 110
@@ -385,6 +386,12 @@ void tamapoke_loop() {
   }
 }
 
+bool tamapoke_consume_radar_request() {
+  if (!gRequestRadarApp) return false;
+  gRequestRadarApp = false;
+  return true;
+}
+
 // brillo segun sueno + inactividad (proteccion del AMOLED)
 void updateBrightness(uint32_t now) {
   // los eventos visibles despiertan la pantalla solos
@@ -549,6 +556,17 @@ void handleTouch() {
   } else if (pressed) {  // sigue apoyado
     tXl = x;
     tYl = y;
+    // Combined-firmware escape hatch: hold the top-center of the round display to return to
+    // Capsule Radar, even when TamaPoke is the saved boot app and the radar
+    // config hint is not visible on-screen.
+    if (!holdFired && !swallowGesture && millis() - tStart > 1800 &&
+        abs(tXl - tX0) < 35 && abs(tYl - tY0) < 35 &&
+        tX0 > 173 && tX0 < 293 && tY0 < 90) {
+      Serial.println("[tamapoke] return-to-radar gesture");
+      gRequestRadarApp = true;
+      holdFired = true;
+      return;
+    }
     // pulsacion larga sin moverse sobre el bicho -> dialogo de soltar
     if (!holdFired && !swallowGesture && !galleryOpen && !cardOpen && !kbOpen && !clockOpen && millis() - tStart > 3000 &&
         abs(tXl - tX0) < 30 && abs(tYl - tY0) < 30 && inPetZone(tX0, tY0) &&
