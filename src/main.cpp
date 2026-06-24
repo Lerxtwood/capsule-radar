@@ -26,10 +26,13 @@
 #include <Preferences.h>            // NVS (persist theme/settings)
 #include <time.h>                   // NTP/RTC clock + date
 #include <WebServer.h>              // configuration web page
+#include <HTTPClient.h>             // remote release manifest + firmware download
+#include <WiFiClientSecure.h>       // HTTPS for remote firmware download
 #include <ESPmDNS.h>                // http://capsuleradar.local
 #include <ArduinoOTA.h>             // OTA firmware update over WiFi (PlatformIO/espota)
 #include <Update.h>                 // browser OTA: self-flash an uploaded .bin
 #include <esp_heap_caps.h>          // largest-free-block metric (heap health)
+#include <mbedtls/sha256.h>         // verify downloaded firmware before flashing
 
 // ---- shared state ----
 static std::vector<Aircraft> g_aircraft;      // latest snapshot
@@ -68,6 +71,7 @@ static float                 g_requeryKm = 0.0f;
 static volatile bool         g_feedOk = true;                        // ADS-B feed healthy? (HUD warning)
 static volatile uint32_t     g_lastFeedOkMs = 0;                     // millis() of the last good poll (HUD staleness)
 static volatile uint32_t     g_rebootAtMs = 0;                       // !=0: reboot when millis() reaches it (clean start after WiFi config)
+static volatile bool         g_firmwareUpdateInProgress = false;     // pause background network work while self-flashing
 static String                g_tz = TZ_STR;                          // POSIX timezone (web-configurable, NVS); applied via configTzTime
 struct PrefetchTrack { std::string hex, call; uint32_t startedMs; };
 static std::vector<PrefetchTrack> g_prefetching;
@@ -98,6 +102,9 @@ static const struct { const char *label; const char *tz; int offMin; int dst; } 
 };
 static const int TZOPTS_N = sizeof(TZOPTS) / sizeof(TZOPTS[0]);
 
+static const char *RELEASE_MANIFEST_URL = "https://github.com/Lerxtwood/capsule-radar/releases/latest/download/manifest.json";
+static const uint32_t MIN_FIRMWARE_SIZE_BYTES = 512UL * 1024UL;
+
 // ---- networking task (core 0): fetch + parse, never touches the display ----
 static void adsb_task(void*) {
     std::vector<Aircraft> fresh;
@@ -106,6 +113,10 @@ static void adsb_task(void*) {
     uint32_t lastFeedOk = millis();          // self-heal: time of last good (or no-WiFi) poll
     for (;;) {
         const bool conn = (WiFi.status() == WL_CONNECTED);
+        if (g_firmwareUpdateInProgress) {
+            vTaskDelay(pdMS_TO_TICKS(250));
+            continue;
+        }
         if (conn && !wasConnected) {
             Serial.printf("[adsb] WiFi up, IP %s\n", WiFi.localIP().toString().c_str());
             configTzTime(g_tz.c_str(), "pool.ntp.org", "time.nist.gov");  // local time (web-configurable TZ)
@@ -912,6 +923,278 @@ static void handleTamapokeRotate() {
 }
 
 // ---- browser OTA: upload an app .bin over WiFi and self-flash ----
+static String jsonEscape(const String &s) {
+    String out;
+    out.reserve(s.length() + 8);
+    for (uint16_t i = 0; i < s.length(); ++i) {
+        const char c = s[i];
+        if (c == '"' || c == '\\') { out += '\\'; out += c; }
+        else if (c == '\n') out += "\\n";
+        else if (c == '\r') out += "\\r";
+        else out += c;
+    }
+    return out;
+}
+
+static String jsonValueForKey(const String &json, const String &key) {
+    const String pattern = "\"" + key + "\"";
+    int keyIndex = json.indexOf(pattern);
+    if (keyIndex < 0) return "";
+    int colonIndex = json.indexOf(':', keyIndex + pattern.length());
+    if (colonIndex < 0) return "";
+    int valueStart = colonIndex + 1;
+    while (valueStart < (int)json.length() && isspace((unsigned char)json[valueStart])) valueStart++;
+    if (valueStart >= (int)json.length()) return "";
+    if (json[valueStart] == '"') {
+        valueStart++;
+        String value;
+        bool escaped = false;
+        for (int i = valueStart; i < (int)json.length(); ++i) {
+            const char c = json[i];
+            if (escaped) { value += c; escaped = false; }
+            else if (c == '\\') escaped = true;
+            else if (c == '"') return value;
+            else value += c;
+        }
+        return "";
+    }
+    int valueEnd = valueStart;
+    while (valueEnd < (int)json.length() && json[valueEnd] != ',' && json[valueEnd] != '}') valueEnd++;
+    String value = json.substring(valueStart, valueEnd);
+    value.trim();
+    return value;
+}
+
+static bool fetchRemoteUpdateManifest(String &manifest, String &error) {
+    if (WiFi.status() != WL_CONNECTED) {
+        error = "WiFi is not connected.";
+        return false;
+    }
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient http;
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    http.setTimeout(15000);
+    if (!http.begin(client, RELEASE_MANIFEST_URL)) {
+        error = "Could not open release manifest URL.";
+        return false;
+    }
+    const int code = http.GET();
+    if (code != HTTP_CODE_OK) {
+        error = "Manifest request failed with HTTP " + String(code) + ".";
+        http.end();
+        return false;
+    }
+    manifest = http.getString();
+    http.end();
+    if (manifest.length() == 0) {
+        error = "Manifest was empty.";
+        return false;
+    }
+    return true;
+}
+
+static bool parseRemoteUpdateManifest(const String &manifest, String &version, String &firmwareUrl,
+                                      String &sha256, uint32_t &size, String &error) {
+    version = jsonValueForKey(manifest, "version");
+    firmwareUrl = jsonValueForKey(manifest, "firmware");
+    sha256 = jsonValueForKey(manifest, "sha256");
+    size = (uint32_t)jsonValueForKey(manifest, "size").toInt();
+    sha256.toLowerCase();
+    if (version.length() == 0 || firmwareUrl.length() == 0 || sha256.length() != 64 || size < MIN_FIRMWARE_SIZE_BYTES) {
+        error = "Manifest is missing version, firmware URL, SHA-256, or a valid size.";
+        return false;
+    }
+    if (!firmwareUrl.startsWith("https://")) {
+        error = "Firmware URL must use HTTPS.";
+        return false;
+    }
+    return true;
+}
+
+static uint16_t versionPart(const String &version, uint8_t partIndex) {
+    uint8_t currentPart = 0;
+    uint16_t value = 0;
+    bool collecting = false;
+    for (uint16_t i = 0; i <= version.length(); ++i) {
+        const char c = i < version.length() ? version[i] : '.';
+        if (isdigit((unsigned char)c)) {
+            if (currentPart == partIndex) {
+                value = (value * 10) + (c - '0');
+                collecting = true;
+            }
+        } else if (c == '.') {
+            if (currentPart == partIndex) return collecting ? value : 0;
+            currentPart++;
+            value = 0;
+            collecting = false;
+        }
+    }
+    return value;
+}
+
+static bool isRemoteVersionNewer(const String &remoteVersion) {
+    String current = FW_VERSION;
+    for (uint8_t part = 0; part < 3; ++part) {
+        const uint16_t remotePart = versionPart(remoteVersion, part);
+        const uint16_t currentPart = versionPart(current, part);
+        if (remotePart > currentPart) return true;
+        if (remotePart < currentPart) return false;
+    }
+    return false;
+}
+
+static bool installRemoteFirmware(const String &firmwareUrl, const String &expectedSha256,
+                                  uint32_t expectedSize, String &error) {
+    if (WiFi.status() != WL_CONNECTED) {
+        error = "WiFi is not connected.";
+        return false;
+    }
+    g_firmwareUpdateInProgress = true;
+
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient http;
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    http.setTimeout(20000);
+    if (!http.begin(client, firmwareUrl)) {
+        error = "Could not open firmware URL.";
+        g_firmwareUpdateInProgress = false;
+        return false;
+    }
+    const int code = http.GET();
+    if (code != HTTP_CODE_OK) {
+        error = "Firmware download failed with HTTP " + String(code) + ".";
+        http.end();
+        g_firmwareUpdateInProgress = false;
+        return false;
+    }
+    if (!Update.begin(expectedSize)) {
+        error = "Could not start firmware update.";
+        Update.printError(Serial);
+        http.end();
+        g_firmwareUpdateInProgress = false;
+        return false;
+    }
+
+    mbedtls_sha256_context shaContext;
+    mbedtls_sha256_init(&shaContext);
+    mbedtls_sha256_starts(&shaContext, 0);
+
+    WiFiClient *stream = http.getStreamPtr();
+    stream->setTimeout(10000);
+    uint8_t buffer[1024];
+    uint32_t written = 0;
+    unsigned long lastReadAt = millis();
+    while (http.connected() && written < expectedSize) {
+        size_t available = stream->available();
+        if (available == 0) {
+            if (millis() - lastReadAt > 20000UL) {
+                error = "Firmware download timed out.";
+                Update.abort();
+                mbedtls_sha256_free(&shaContext);
+                http.end();
+                g_firmwareUpdateInProgress = false;
+                return false;
+            }
+            delay(1);
+            yield();
+            continue;
+        }
+        size_t toRead = available < sizeof(buffer) ? available : sizeof(buffer);
+        const size_t remainingBytes = expectedSize - written;
+        toRead = toRead < remainingBytes ? toRead : remainingBytes;
+        const int bytesRead = stream->readBytes(buffer, toRead);
+        if (bytesRead <= 0) continue;
+        lastReadAt = millis();
+        mbedtls_sha256_update(&shaContext, buffer, bytesRead);
+        if (Update.write(buffer, bytesRead) != (size_t)bytesRead) {
+            error = "Firmware flash write failed.";
+            Update.abort();
+            mbedtls_sha256_free(&shaContext);
+            http.end();
+            g_firmwareUpdateInProgress = false;
+            return false;
+        }
+        written += bytesRead;
+    }
+    http.end();
+    if (written != expectedSize) {
+        error = "Firmware download size mismatch.";
+        Update.abort();
+        mbedtls_sha256_free(&shaContext);
+        g_firmwareUpdateInProgress = false;
+        return false;
+    }
+
+    uint8_t digest[32];
+    mbedtls_sha256_finish(&shaContext, digest);
+    mbedtls_sha256_free(&shaContext);
+    char actualSha256[65];
+    for (uint8_t i = 0; i < 32; ++i) snprintf(actualSha256 + (i * 2), 3, "%02x", digest[i]);
+    actualSha256[64] = '\0';
+    if (expectedSha256 != String(actualSha256)) {
+        error = "Firmware SHA-256 verification failed.";
+        Update.abort();
+        g_firmwareUpdateInProgress = false;
+        return false;
+    }
+    if (!Update.end(true)) {
+        error = "ESP32 firmware validation failed.";
+        Update.printError(Serial);
+        g_firmwareUpdateInProgress = false;
+        return false;
+    }
+    Serial.printf("[update] remote done: %u bytes sha256=%s\n", (unsigned)written, actualSha256);
+    return true;
+}
+
+static void handleRemoteUpdateCheck() {
+    String manifest, error, version, firmwareUrl, sha256;
+    uint32_t size = 0;
+    if (!fetchRemoteUpdateManifest(manifest, error) ||
+        !parseRemoteUpdateManifest(manifest, version, firmwareUrl, sha256, size, error)) {
+        g_web.send(500, "application/json", "{\"error\":\"" + jsonEscape(error) + "\"}");
+        return;
+    }
+    const bool newer = isRemoteVersionNewer(version);
+    String msg = newer ? "Version " + version + " is available (" + String(size) + " bytes)."
+                       : "Current firmware " + String(FW_VERSION) + " is up to date.";
+    String out = "{\"currentVersion\":\"" + jsonEscape(FW_VERSION) + "\",\"remoteVersion\":\"" +
+                 jsonEscape(version) + "\",\"updateAvailable\":" + (newer ? "true" : "false") +
+                 ",\"size\":" + String(size) + ",\"message\":\"" + jsonEscape(msg) + "\"}";
+    g_web.send(200, "application/json", out);
+}
+
+static void handleRemoteUpdateInstall() {
+    String manifest, error, version, firmwareUrl, sha256;
+    uint32_t size = 0;
+    if (!fetchRemoteUpdateManifest(manifest, error) ||
+        !parseRemoteUpdateManifest(manifest, version, firmwareUrl, sha256, size, error)) {
+        g_firmwareUpdateInProgress = false;
+        g_web.send(500, "text/plain", error);
+        return;
+    }
+    if (!isRemoteVersionNewer(version)) {
+        g_web.send(409, "text/plain", "No newer firmware is available.");
+        return;
+    }
+    Serial.printf("[update] installing remote firmware %s (%u bytes)\n", version.c_str(), (unsigned)size);
+    if (!installRemoteFirmware(firmwareUrl, sha256, size, error)) {
+        g_web.send(500, "text/plain", error);
+        return;
+    }
+    g_web.sendHeader("Connection", "close");
+    g_web.sendHeader("Refresh", "8; url=/");
+    g_web.send(200, "text/html",
+        "<!DOCTYPE html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<body style='background:#06100a;color:#1dff86;font-family:system-ui,sans-serif;padding:24px'>"
+        "<h1>Firmware updated</h1><p>Downloaded and verified version " + version +
+        ". Restarting now...</p><script>setTimeout(function(){location.href='/'},8000)</script></body></html>");
+    delay(900);
+    ESP.restart();
+}
+
 static void handleUpdatePage() {
     g_web.send(200, "text/html",
         "<!DOCTYPE html><html><head><meta charset=utf-8>"
@@ -919,25 +1202,35 @@ static void handleUpdatePage() {
         "<title>Capsule Radar - Update</title><style>"
         "body{background:radial-gradient(circle at 50% -10%,#0a1f15,#04100a 70%);color:#cdd6d1;"
         "font-family:system-ui,sans-serif;margin:0 auto;padding:20px;max-width:480px;min-height:100vh}"
-        "h1{color:#1dff86;font-size:20px}.card{background:rgba(10,20,14,.85);border:1px solid #1f3a2b;border-radius:14px;padding:16px}"
+        "h1{color:#1dff86;font-size:20px}.card{background:rgba(10,20,14,.85);border:1px solid #1f3a2b;border-radius:14px;padding:16px;margin-bottom:14px}"
         ".nav{display:flex;gap:8px;margin:0 0 14px}.nav a{flex:1;text-align:center;text-decoration:none;"
         "padding:9px 8px;border:1px solid #2a4a39;border-radius:9px;color:#9affc8;background:#0c1a12}"
         ".nav a.on{background:#1dff86;color:#04140b;border-color:#1dff86;font-weight:700}"
         "input,button{width:100%;box-sizing:border-box;padding:11px;border-radius:8px;margin-top:8px;font-size:16px}"
         "input{background:#0c1a12;color:#eafff3;border:1px solid #2a4a39}"
-        "button{border:0;background:#1dff86;color:#04140b;font-weight:700}"
+        "button{border:0;background:#1dff86;color:#04140b;font-weight:700}button:disabled{opacity:.45}.sec{background:#0c1a12;color:#1dff86;border:1px solid #2a4a39}"
         "#bar{height:12px;background:#0c1a12;border-radius:6px;overflow:hidden;margin-top:14px;display:none}"
-        "#fill{height:100%;width:0;background:#1dff86;transition:width .2s}#msg{margin-top:10px;color:#9affc8;font-size:13px}"
+        "#fill{height:100%;width:0;background:#1dff86;transition:width .2s}#msg,#rmsg{margin-top:10px;color:#9affc8;font-size:13px}"
+        ".t{color:#1dff86;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:10px;opacity:.85}"
         "a{color:#1dff86}p{color:#9affc8;font-size:13px}"
         "</style></head><body><h1>Firmware update (OTA)</h1>"
         "<nav class=nav><a href=/>Capsule-Radar</a><a href=/tamapoke>TamaPoke</a><a class=on href=/update>Firmware</a></nav>"
-        "<div class=card>"
+        "<div class=card><div class=t>GitHub release</div>"
+        "<p>Current firmware: <b>v" FW_VERSION "</b></p>"
+        "<p>Check the latest GitHub Release and install the verified <code>CapsuleRadar-ota.bin</code> directly from the device.</p>"
+        "<button class=sec onclick=c()>Check GitHub</button><button id=ri disabled onclick=ri()>Install latest</button><div id=rmsg>Waiting.</div></div>"
+        "<div class=card><div class=t>Manual upload</div>"
         "<p>Upload the <b>app firmware</b> <code>CapsuleRadar-ota.bin</code> from the GitHub release. "
         "Do NOT use the merged flash image here.</p>"
         "<input type=file id=f accept='.bin'>"
         "<button onclick=u()>Update over WiFi</button>"
         "<div id=bar><div id=fill></div></div><div id=msg></div></div>"
-        "<script>function u(){var f=document.getElementById('f').files[0];if(!f){return}"
+        "<script>var ready=0;function c(){var m=document.getElementById('rmsg'),b=document.getElementById('ri');b.disabled=true;m.innerText='Checking GitHub...';"
+        "fetch('/remote-update-check').then(r=>r.json().then(j=>({ok:r.ok,j:j}))).then(o=>{if(!o.ok)throw Error(o.j.error||'Check failed');"
+        "ready=o.j.updateAvailable?1:0;b.disabled=!ready;m.innerText=o.j.message;}).catch(e=>{ready=0;b.disabled=true;m.innerText='Check failed: '+e.message;});}"
+        "function ri(){if(!ready)return;var m=document.getElementById('rmsg'),b=document.getElementById('ri');b.disabled=true;m.innerText='Downloading and installing. Do not power off...';"
+        "fetch('/remote-update-install',{method:'POST'}).then(r=>r.text().then(t=>({ok:r.ok,t:t}))).then(o=>{if(!o.ok)throw Error(o.t||'Install failed');document.open();document.write(o.t);document.close();}).catch(e=>{b.disabled=false;m.innerText='Install failed: '+e.message;});}"
+        "function u(){var f=document.getElementById('f').files[0];if(!f){return}"
         "var x=new XMLHttpRequest(),fd=new FormData();fd.append('f',f);"
         "document.getElementById('bar').style.display='block';"
         "x.upload.onprogress=function(e){if(e.lengthComputable)document.getElementById('fill').style.width=(e.loaded/e.total*100)+'%'};"
@@ -949,6 +1242,7 @@ static void handleUpdatePage() {
 static void handleUpdateUpload() {
     HTTPUpload &up = g_web.upload();
     if (up.status == UPLOAD_FILE_START) {
+        g_firmwareUpdateInProgress = true;
         Serial.printf("[update] start: %s\n", up.filename.c_str());
         if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
     } else if (up.status == UPLOAD_FILE_WRITE) {
@@ -956,6 +1250,9 @@ static void handleUpdateUpload() {
     } else if (up.status == UPLOAD_FILE_END) {
         if (Update.end(true)) Serial.printf("[update] done: %u bytes\n", (unsigned)up.totalSize);
         else Update.printError(Serial);
+    } else if (up.status == UPLOAD_FILE_ABORTED) {
+        Update.abort();
+        g_firmwareUpdateInProgress = false;
     }
 }
 
@@ -1079,12 +1376,15 @@ void setup() {
     g_web.on("/tamapoke", HTTP_GET, handleTamapokePage);
     g_web.on("/tamapoke/rotate", handleTamapokeRotate);
     g_web.on("/update", HTTP_GET, handleUpdatePage);
+    g_web.on("/remote-update-check", HTTP_GET, handleRemoteUpdateCheck);
+    g_web.on("/remote-update-install", HTTP_POST, handleRemoteUpdateInstall);
     g_web.on("/update", HTTP_POST,
         []() {
             const bool ok = !Update.hasError();
             g_web.send(200, "text/plain", ok ? "OK" : "FAIL");
             delay(800);
             if (ok) ESP.restart();
+            g_firmwareUpdateInProgress = false;
         },
         handleUpdateUpload);
     g_web.begin();
