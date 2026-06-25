@@ -72,6 +72,7 @@ static volatile bool         g_feedOk = true;                        // ADS-B fe
 static volatile uint32_t     g_lastFeedOkMs = 0;                     // millis() of the last good poll (HUD staleness)
 static volatile uint32_t     g_rebootAtMs = 0;                       // !=0: reboot when millis() reaches it (clean start after WiFi config)
 static volatile bool         g_firmwareUpdateInProgress = false;     // pause background network work while self-flashing
+static bool                  g_firmwareUpdateMode = false;           // lightweight boot mode for GitHub TLS + self-update
 static String                g_tz = TZ_STR;                          // POSIX timezone (web-configurable, NVS); applied via configTzTime
 struct PrefetchTrack { std::string hex, call; uint32_t startedMs; };
 static std::vector<PrefetchTrack> g_prefetching;
@@ -1055,6 +1056,42 @@ static bool isRemoteVersionNewer(const String &remoteVersion) {
     return false;
 }
 
+static bool firmwareUpdateModeSaved() {
+    Preferences p;
+    if (!p.begin("cr_app", true)) return false;
+    const bool enabled = p.getBool("updmode", false);
+    p.end();
+    return enabled;
+}
+
+static void saveFirmwareUpdateMode(bool enabled) {
+    Preferences p;
+    if (!p.begin("cr_app", false)) return;
+    p.putBool("updmode", enabled);
+    p.end();
+}
+
+static void handleEnterUpdateMode() {
+    saveFirmwareUpdateMode(true);
+    g_web.send(200, "text/html",
+        "<!DOCTYPE html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<body style='background:#06100a;color:#1dff86;font-family:system-ui,sans-serif;padding:24px'>"
+        "<h1>Entering updater mode</h1><p>The device is restarting into a lightweight firmware updater. Reload "
+        "<code>http://capsuleradar.local/update</code> in about 10 seconds.</p></body></html>");
+    delay(700);
+    ESP.restart();
+}
+
+static void handleExitUpdateMode() {
+    saveFirmwareUpdateMode(false);
+    g_web.send(200, "text/html",
+        "<!DOCTYPE html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<body style='background:#06100a;color:#1dff86;font-family:system-ui,sans-serif;padding:24px'>"
+        "<h1>Leaving updater mode</h1><p>Restarting back into Capsule Radar...</p></body></html>");
+    delay(700);
+    ESP.restart();
+}
+
 static bool installRemoteFirmware(const String &firmwareUrl, const String &expectedSha256,
                                   uint32_t expectedSize, String &error) {
     if (WiFi.status() != WL_CONNECTED) {
@@ -1206,6 +1243,7 @@ static void handleRemoteUpdateInstall() {
         "<h1>Firmware updated</h1><p>Downloaded and verified version " + version +
         ". Restarting now...</p><script>setTimeout(function(){location.href='/'},8000)</script></body></html>");
     delay(900);
+    saveFirmwareUpdateMode(false);
     ESP.restart();
 }
 
@@ -1232,7 +1270,9 @@ static void handleUpdatePage() {
         "<div class=card><div class=t>GitHub release</div>"
         "<p>Current firmware: <b>v" FW_VERSION "</b></p>"
         "<p>Check the latest GitHub Release and install the verified <code>CapsuleRadar-ota.bin</code> directly from the device.</p>"
-        "<button class=sec onclick=c()>Check GitHub</button><button id=ri disabled onclick=ri()>Install latest</button><div id=rmsg>Waiting.</div></div>"
+        "<button class=sec onclick=c()>Check GitHub</button><button id=ri disabled onclick=ri()>Install latest</button>"
+        "<button class=sec onclick=um()>Restart in lightweight updater mode</button><button class=sec onclick=xum()>Exit updater mode</button>"
+        "<div id=rmsg>Waiting.</div></div>"
         "<div class=card><div class=t>Manual upload</div>"
         "<p>Upload the <b>app firmware</b> <code>CapsuleRadar-ota.bin</code> from the GitHub release. "
         "Do NOT use the merged flash image here.</p>"
@@ -1244,6 +1284,8 @@ static void handleUpdatePage() {
         "ready=o.j.updateAvailable?1:0;b.disabled=!ready;m.innerText=o.j.message;}).catch(e=>{ready=0;b.disabled=true;m.innerText='Check failed: '+e.message;});}"
         "function ri(){if(!ready)return;var m=document.getElementById('rmsg'),b=document.getElementById('ri');b.disabled=true;m.innerText='Downloading and installing. Do not power off...';"
         "fetch('/remote-update-install',{method:'POST'}).then(r=>r.text().then(t=>({ok:r.ok,t:t}))).then(o=>{if(!o.ok)throw Error(o.t||'Install failed');document.open();document.write(o.t);document.close();}).catch(e=>{b.disabled=false;m.innerText='Install failed: '+e.message;});}"
+        "function um(){document.getElementById('rmsg').innerText='Restarting into lightweight updater mode...';fetch('/enter-update-mode',{method:'POST'}).then(r=>r.text()).then(t=>{document.open();document.write(t);document.close();});}"
+        "function xum(){document.getElementById('rmsg').innerText='Restarting back to normal mode...';fetch('/exit-update-mode',{method:'POST'}).then(r=>r.text()).then(t=>{document.open();document.write(t);document.close();});}"
         "function u(){var f=document.getElementById('f').files[0];if(!f){return}"
         "var x=new XMLHttpRequest(),fd=new FormData();fd.append('f',f);"
         "document.getElementById('bar').style.display='block';"
@@ -1270,10 +1312,55 @@ static void handleUpdateUpload() {
     }
 }
 
+static void setupFirmwareUpdateMode() {
+    g_firmwareUpdateMode = true;
+    g_firmwareUpdateInProgress = false;
+    Serial.println("[update] lightweight updater mode");
+
+    WiFi.mode(WIFI_STA);
+    WiFi.begin();
+    const uint32_t start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 15000UL) {
+        delay(100);
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+        Serial.printf("[update] WiFi up, IP %s\n", WiFi.localIP().toString().c_str());
+        MDNS.begin("capsuleradar");
+    } else {
+        Serial.println("[update] WiFi not connected; updater page will still start if network recovers");
+    }
+
+    g_web.on("/", HTTP_GET, handleUpdatePage);
+    g_web.on("/update", HTTP_GET, handleUpdatePage);
+    g_web.on("/enter-update-mode", HTTP_POST, handleEnterUpdateMode);
+    g_web.on("/exit-update-mode", HTTP_POST, handleExitUpdateMode);
+    g_web.on("/remote-update-check", HTTP_GET, handleRemoteUpdateCheck);
+    g_web.on("/remote-update-install", HTTP_POST, handleRemoteUpdateInstall);
+    g_web.on("/update", HTTP_POST,
+        []() {
+            const bool ok = !Update.hasError();
+            g_web.send(200, "text/plain", ok ? "OK" : "FAIL");
+            delay(800);
+            if (ok) {
+                saveFirmwareUpdateMode(false);
+                ESP.restart();
+            }
+            g_firmwareUpdateInProgress = false;
+        },
+        handleUpdateUpload);
+    g_web.begin();
+    Serial.printf("[update] page: http://%s/update\n",
+                  WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString().c_str() : "capsuleradar.local");
+}
+
 void setup() {
     Serial.begin(115200);
     delay(200);
     Serial.println("\nCapsule Radar boot");
+    if (firmwareUpdateModeSaved()) {
+        setupFirmwareUpdateMode();
+        return;
+    }
 
     if (PIN_LCD_SCLK < 0 || PIN_I2C_SDA < 0) {
         Serial.println("[!] Pins in config.h are still -1. Copy them from the Waveshare demo.");
@@ -1390,6 +1477,8 @@ void setup() {
     g_web.on("/tamapoke", HTTP_GET, handleTamapokePage);
     g_web.on("/tamapoke/rotate", handleTamapokeRotate);
     g_web.on("/update", HTTP_GET, handleUpdatePage);
+    g_web.on("/enter-update-mode", HTTP_POST, handleEnterUpdateMode);
+    g_web.on("/exit-update-mode", HTTP_POST, handleExitUpdateMode);
     g_web.on("/remote-update-check", HTTP_GET, handleRemoteUpdateCheck);
     g_web.on("/remote-update-install", HTTP_POST, handleRemoteUpdateInstall);
     g_web.on("/update", HTTP_POST,
@@ -1427,6 +1516,13 @@ void setup() {
 }
 
 void loop() {
+    if (g_firmwareUpdateMode) {
+        g_web.handleClient();
+        if (g_rebootAtMs && (int32_t)(millis() - g_rebootAtMs) >= 0) { delay(50); ESP.restart(); }
+        delay(2);
+        return;
+    }
+
     if (g_appMode == 0) display::loop();  // drive LVGL (render dirty areas + run timers)
     else                tamapoke_loop();  // guest app owns direct full-screen drawing
     g_wm.process();                 // service the WiFi config portal (non-blocking)
