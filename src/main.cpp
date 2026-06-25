@@ -1248,7 +1248,7 @@ static void handleRemoteUpdateInstall() {
 }
 
 static void handleUpdatePage() {
-    g_web.send(200, "text/html",
+    String page = F(
         "<!DOCTYPE html><html><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
         "<title>Capsule Radar - Update</title><style>"
@@ -1262,7 +1262,8 @@ static void handleUpdatePage() {
         "input{background:#0c1a12;color:#eafff3;border:1px solid #2a4a39}"
         "button{border:0;background:#1dff86;color:#04140b;font-weight:700}button:disabled{opacity:.45}.sec{background:#0c1a12;color:#1dff86;border:1px solid #2a4a39}"
         "#bar{height:12px;background:#0c1a12;border-radius:6px;overflow:hidden;margin-top:14px;display:none}"
-        "#fill{height:100%;width:0;background:#1dff86;transition:width .2s}#msg,#rmsg{margin-top:10px;color:#9affc8;font-size:13px}"
+        "#fill,#rfill{height:100%;width:0;background:#1dff86;transition:width .2s}#msg,#rmsg{margin-top:10px;color:#9affc8;font-size:13px}"
+        "#rbar{height:12px;background:#0c1a12;border-radius:6px;overflow:hidden;margin-top:14px;display:none}"
         ".t{color:#1dff86;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:10px;opacity:.85}"
         "a{color:#1dff86}p{color:#9affc8;font-size:13px}"
         "</style></head><body><h1>Firmware update (OTA)</h1>"
@@ -1272,20 +1273,31 @@ static void handleUpdatePage() {
         "<p>Check the latest GitHub Release and install the verified <code>CapsuleRadar-ota.bin</code> directly from the device.</p>"
         "<button class=sec onclick=c()>Check GitHub</button><button id=ri disabled onclick=ri()>Install latest</button>"
         "<button class=sec onclick=um()>Restart in lightweight updater mode</button><button class=sec onclick=xum()>Exit updater mode</button>"
-        "<div id=rmsg>Waiting.</div></div>"
+        "<div id=rbar><div id=rfill></div></div><div id=rmsg>Waiting.</div></div>"
         "<div class=card><div class=t>Manual upload</div>"
         "<p>Upload the <b>app firmware</b> <code>CapsuleRadar-ota.bin</code> from the GitHub release. "
         "Do NOT use the merged flash image here.</p>"
         "<input type=file id=f accept='.bin'>"
         "<button onclick=u()>Update over WiFi</button>"
         "<div id=bar><div id=fill></div></div><div id=msg></div></div>"
-        "<script>var ready=0;function c(){var m=document.getElementById('rmsg'),b=document.getElementById('ri');b.disabled=true;m.innerText='Checking GitHub...';"
-        "fetch('/remote-update-check').then(r=>r.json().then(j=>({ok:r.ok,j:j}))).then(o=>{if(!o.ok)throw Error(o.j.error||'Check failed');"
-        "ready=o.j.updateAvailable?1:0;b.disabled=!ready;m.innerText=o.j.message;}).catch(e=>{ready=0;b.disabled=true;m.innerText='Check failed: '+e.message;});}"
-        "function ri(){if(!ready)return;var m=document.getElementById('rmsg'),b=document.getElementById('ri');b.disabled=true;m.innerText='Downloading and installing. Do not power off...';"
-        "fetch('/remote-update-install',{method:'POST'}).then(r=>r.text().then(t=>({ok:r.ok,t:t}))).then(o=>{if(!o.ok)throw Error(o.t||'Install failed');document.open();document.write(o.t);document.close();}).catch(e=>{b.disabled=false;m.innerText='Install failed: '+e.message;});}"
+        "<script>var ready=0,MODE=@,pt=0,pp=0;"
+        "function setm(s){document.getElementById('rmsg').innerText=s}function ib(){document.getElementById('ri').disabled=!ready}"
+        "function prog(p){document.getElementById('rbar').style.display='block';document.getElementById('rfill').style.width=p+'%'}"
+        "function pstart(max,step,ms){clearInterval(pt);pp=8;prog(pp);pt=setInterval(()=>{pp=Math.min(max,pp+step);prog(pp)},ms)}"
+        "function pstop(p){clearInterval(pt);prog(p)}"
+        "function checkNow(){var b=document.getElementById('ri');b.disabled=true;setm('Checking GitHub...');pstart(85,6,650);"
+        "return fetch('/remote-update-check').then(r=>r.json().then(j=>({ok:r.ok,j:j}))).then(o=>{if(!o.ok)throw Error(o.j.error||'Check failed');"
+        "pstop(100);ready=o.j.updateAvailable?1:0;ib();setm(o.j.message);localStorage.removeItem('crAutoCheck');return o.j;}).catch(e=>{pstop(0);ready=0;ib();setm('Check failed: '+e.message);localStorage.removeItem('crAutoCheck');});}"
+        "function pollCheck(n){setm('Restarting into lightweight updater and checking GitHub...');pstart(70,3,700);let tries=0,t=setInterval(()=>{tries++;"
+        "fetch('/remote-update-check').then(r=>r.json().then(j=>({ok:r.ok,j:j}))).then(o=>{if(!o.ok)throw Error(o.j.error||'Check failed');clearInterval(t);"
+        "pstop(100);ready=o.j.updateAvailable?1:0;ib();setm(o.j.message);localStorage.removeItem('crAutoCheck');}).catch(e=>{if(tries>n){clearInterval(t);pstop(0);ready=0;ib();setm('Check failed after updater restart: '+e.message);localStorage.removeItem('crAutoCheck');}});},2500)}"
+        "function c(){if(MODE)return checkNow();localStorage.setItem('crAutoCheck','1');ready=0;ib();setm('Restarting into lightweight updater and checking GitHub...');"
+        "fetch('/enter-update-mode',{method:'POST'}).catch(()=>{});pollCheck(24);}"
+        "function ri(){if(!ready)return;var m=document.getElementById('rmsg'),b=document.getElementById('ri');b.disabled=true;m.innerText='Downloading and installing. Do not power off...';pstart(92,2,900);"
+        "fetch('/remote-update-install',{method:'POST'}).then(r=>r.text().then(t=>({ok:r.ok,t:t}))).then(o=>{if(!o.ok)throw Error(o.t||'Install failed');pstop(100);document.open();document.write(o.t);document.close();}).catch(e=>{pstop(0);b.disabled=false;m.innerText='Install failed: '+e.message;});}"
         "function um(){document.getElementById('rmsg').innerText='Restarting into lightweight updater mode...';fetch('/enter-update-mode',{method:'POST'}).then(r=>r.text()).then(t=>{document.open();document.write(t);document.close();});}"
         "function xum(){document.getElementById('rmsg').innerText='Restarting back to normal mode...';fetch('/exit-update-mode',{method:'POST'}).then(r=>r.text()).then(t=>{document.open();document.write(t);document.close();});}"
+        "if(localStorage.getItem('crAutoCheck')==='1'){if(MODE)setTimeout(checkNow,800);else pollCheck(24);}"
         "function u(){var f=document.getElementById('f').files[0];if(!f){return}"
         "var x=new XMLHttpRequest(),fd=new FormData();fd.append('f',f);"
         "document.getElementById('bar').style.display='block';"
@@ -1293,6 +1305,8 @@ static void handleUpdatePage() {
         "x.onload=function(){document.getElementById('msg').innerText=x.responseText+' - rebooting...'};"
         "x.onerror=function(){document.getElementById('msg').innerText='Upload failed'};"
         "x.open('POST','/update');x.send(fd);}</script></body></html>");
+    page.replace("MODE=@", g_firmwareUpdateMode ? "MODE=1" : "MODE=0");
+    g_web.send(200, "text/html", page);
 }
 
 static void handleUpdateUpload() {
