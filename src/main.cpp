@@ -44,6 +44,9 @@ static WiFiManager           g_wm;
 static int                   g_brightnessDay = BRIGHTNESS_DEFAULT;   // user brightness (web/NVS)
 static int                   g_volume = 60;                          // alert volume 0..100 (web/NVS)
 static bool                  g_muted  = false;                       // mute alert pings
+static bool                  g_quietHours = false;                   // mute radar sounds between quiet start/end
+static int                   g_quietStartMin = 22 * 60;              // minutes after midnight, local time
+static int                   g_quietEndMin = 8 * 60;                 // minutes after midnight, local time
 static int                   g_alertMode = 2;                        // 0=off 1=emergencies 2=new+emergencies (web/NVS)
 static float                 g_proximityKm = 0.0f;                   // proximity alert radius, km (0=off) (web/NVS)
 static uint32_t              g_idleDimMs = IDLE_DIM_MS;              // dim after this idle time (0 = never)
@@ -63,6 +66,7 @@ static int                   g_rotation = 0;                         // display 
 static int                   g_rotationOffset = 0;                   // fine display rotation adjustment, degrees (web/NVS)
 static bool                  g_useGps = false;                       // auto-set home from the LC76G GPS (-G variant) (web/NVS)
 static int                   g_trailLen = 2;                         // aircraft trails 0=off 1=short 2=med 3=long (web/NVS)
+static int                   g_trackingFontSize = 0;                 // aircraft floating labels 0=small 1=medium 2=large
 static volatile bool         g_onBattery = false;                    // discharging (set on core 1, read on core 0)
 static bool                  g_rtcSynced = false;                    // RTC written from NTP this session?
 static std::vector<Aircraft> g_snap;                                 // last snapshot (instant re-render on zoom)
@@ -200,10 +204,14 @@ static void loadSettings() {
     g_brightnessDay    = p.getInt("bright", BRIGHTNESS_DEFAULT);
     g_volume           = p.getInt("vol", 60);
     g_muted            = p.getBool("mute", false);
+    g_quietHours       = p.getBool("quiet", false);
+    g_quietStartMin    = constrain(p.getInt("qstart", 22 * 60), 0, 1439);
+    g_quietEndMin      = constrain(p.getInt("qend", 8 * 60), 0, 1439);
     g_alertMode        = p.getInt("alertmode", 2);
     g_proximityKm      = p.getFloat("proxkm", 0.0f);
     g_useGps           = p.getBool("usegps", false);
     g_trailLen         = p.getInt("traillen", 2);
+    g_trackingFontSize = constrain(p.getInt("trackfont", 0), 0, 2);
     g_idleDimMs        = p.getUInt("idledim", IDLE_DIM_MS);
     g_units            = p.getInt("units", 0);
     g_prefetchDetails  = p.getBool("prefetch", true);
@@ -228,10 +236,40 @@ static void loadSettings() {
                   appBootGuard ? 1 : 0);
 }
 
+static void minutesToTimeValue(int minutes, char *out, size_t outLen) {
+    minutes = constrain(minutes, 0, 1439);
+    snprintf(out, outLen, "%02d:%02d", minutes / 60, minutes % 60);
+}
+
+static int parseTimeToMinutes(const String &value, int fallback) {
+    if (value.length() < 4) return fallback;
+    const int colon = value.indexOf(':');
+    if (colon <= 0) return fallback;
+    const int hh = value.substring(0, colon).toInt();
+    const int mm = value.substring(colon + 1).toInt();
+    if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return fallback;
+    return hh * 60 + mm;
+}
+
+static bool quietHoursActiveNow() {
+    if (!g_quietHours || g_quietStartMin == g_quietEndMin) return false;
+    struct tm ti;
+    if (!getLocalTime(&ti, 0)) return false;   // fail open until RTC/NTP gives us a clock
+    const int nowMin = ti.tm_hour * 60 + ti.tm_min;
+    if (g_quietStartMin < g_quietEndMin) {
+        return nowMin >= g_quietStartMin && nowMin < g_quietEndMin;
+    }
+    return nowMin >= g_quietStartMin || nowMin < g_quietEndMin;  // crosses midnight
+}
+
+static bool radarSoundAllowed() {
+    return audio_present() && !g_muted && !quietHoursActiveNow() && g_volume > 0;
+}
+
 // Audio alerts. g_alertMode: 0 = off, 1 = emergencies only, 2 = new aircraft + emergencies.
 // g_proximityKm > 0 also pings (once) when any aircraft crosses into that radius.
 static void checkAudioEvents() {
-    const bool canAudio = audio_present();
+    const bool canAudio = radarSoundAllowed();
     static std::set<std::string> seen, seenProx;
     static bool first = true;
     static uint32_t lastNew = 0;
@@ -413,6 +451,13 @@ static void handleRoot() {
         snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == g_trailLen ? " selected" : "", tlnames[i]);
         tlopts += o;
     }
+    const char *tfnames[] = {"Small", "Medium", "Large"};
+    String tfopts;
+    for (int i = 0; i < 3; ++i) {
+        char o[64];
+        snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == g_trackingFontSize ? " selected" : "", tfnames[i]);
+        tfopts += o;
+    }
     const char *appnames[] = {"Capsule Radar", "TamaPoke"};
     String appopts;
     for (int i = 0; i < 2; ++i) {
@@ -439,6 +484,9 @@ static void handleRoot() {
         snprintf(o, sizeof(o), "<option value=%.3f%s>%s</option>", pkm, sel ? " selected" : "", lbl);
         popts += o;
     }
+    char quietStart[6], quietEnd[6];
+    minutesToTimeValue(g_quietStartMin, quietStart, sizeof(quietStart));
+    minutesToTimeValue(g_quietEndMin, quietEnd, sizeof(quietEnd));
     String tzopts;   // time-zone dropdown (value = index into TZOPTS; mapped to POSIX TZ on save)
     for (int i = 0; i < TZOPTS_N; ++i) {
         char o[128];
@@ -454,7 +502,7 @@ static void handleRoot() {
         gpsRow += "<div style='font-size:12px;opacity:.6;margin:-2px 0 6px'>"
                   "When on, the location above is used until the GPS gets a fix, then it takes over.</div>";
     }
-    static const size_t BUFSZ = 10240;
+    static const size_t BUFSZ = 14336;
     static char *buf = (char *)ps_malloc(BUFSZ);   // PSRAM: keep this big page buffer off the scarce
     if (!buf) return;                              //   internal heap (the contiguous RAM mbedTLS needs)
     snprintf(buf, BUFSZ,
@@ -512,6 +560,7 @@ static void handleRoot() {
         "<label><input type=checkbox class=ck %s onchange='gf(this.checked)'>Use generic aircraft photos</label>"
         "<label><input type=checkbox class=ck %s onchange='ap(this.checked)'>Show airports</label>"
         "<label>Aircraft trails</label><select onchange='tl(this.value)'>%s</select>"
+        "<label>Tracking label font</label><select onchange=\"fetch('/tracking-font?v='+this.value+'&save=1')\">%s</select>"
         "<label>Screen rotation (USB-C position)</label><select onchange='ro(this.value)'>%s</select>"
         "<label>Rotation offset (degrees)</label><input type=number min=-45 max=45 step=1 value='%d' onchange='rf(this.value)'>"
         "<label>Units</label><select onchange='u(this.value)'>%s</select></div>"
@@ -519,6 +568,11 @@ static void handleRoot() {
         "<label>Volume</label>"
         "<input type=range min=0 max=100 value='%d' oninput='v(this.value,0)' onchange='v(this.value,1)'>"
         "<label><input type=checkbox class=ck %s onchange='m(this.checked)'>Mute alerts</label>"
+        "<label><input id=quiet type=checkbox class=ck %s onchange='qh()'>Quiet hours</label>"
+        "<div style='display:grid;grid-template-columns:1fr 1fr;gap:8px'>"
+        "<div><label>Quiet start</label><input id=qs type=time value='%s' onchange='qh()'></div>"
+        "<div><label>Quiet end</label><input id=qe type=time value='%s' onchange='qh()'></div></div>"
+        "<p style='color:#6f8c7d;font-size:12px;margin:6px 0 0'>Mutes radar beeps during this local-time window, including overnight ranges.</p>"
         "<label>Alert on</label><select onchange='al(this.value)'>%s</select>"
         "<label>Proximity alert</label><select onchange='px(this.value)'>%s</select>"
         "<button type=button class=sec onclick='t()'>Test ping</button></div>"
@@ -537,6 +591,7 @@ static void handleRoot() {
         "function b(v,s){fetch('/bright?v='+v+(s?'&save=1':''))}"
         "function v(x,s){fetch('/vol?v='+x+(s?'&save=1':''))}"
         "function m(c){fetch('/vol?mute='+(c?1:0)+'&save=1')}"
+        "function qh(){fetch('/vol?quiet='+(document.getElementById('quiet').checked?1:0)+'&qstart='+document.getElementById('qs').value+'&qend='+document.getElementById('qe').value+'&save=1')}"
         "function t(){fetch('/vol?test=1')}"
         "function d(v){fetch('/idle?v='+v+'&save=1')}"
         "function app(v){fetch('/app?v='+v+'&save=1')}"
@@ -545,6 +600,7 @@ static void handleRoot() {
         "function gf(c){fetch('/generic-photos?v='+(c?1:0)+'&save=1')}"
         "function ap(c){fetch('/airports?v='+(c?1:0)+'&save=1')}"
         "function tl(v){fetch('/trail?v='+v+'&save=1')}"
+        "function tf(v){fetch('/tracking-font?v='+v+'&save=1')}"
         "function ro(v){fetch('/rotate?v='+v+'&save=1')}"
         "function rf(v){fetch('/rotate-offset?v='+v+'&save=1')}"
         "function u(v){fetch('/units?v='+v+'&save=1')}"
@@ -564,8 +620,9 @@ static void handleRoot() {
         g_brightnessDay, iopts.c_str(), appopts.c_str(),
         g_showSweep ? "checked" : "", g_prefetchDetails ? "checked" : "",
         g_genericPhotos ? "checked" : "",
-        g_showAirports ? "checked" : "", tlopts.c_str(), rotopts.c_str(), g_rotationOffset, uopts.c_str(),
-        g_volume, g_muted ? "checked" : "", aopts.c_str(), popts.c_str(),
+        g_showAirports ? "checked" : "", tlopts.c_str(), tfopts.c_str(), rotopts.c_str(), g_rotationOffset, uopts.c_str(),
+        g_volume, g_muted ? "checked" : "", g_quietHours ? "checked" : "",
+        quietStart, quietEnd, aopts.c_str(), popts.c_str(),
         g_settings.homeLat, g_settings.homeLon, (g_tz == TZ_STR ? 0 : 1));
     g_web.send(200, "text/html", buf);
 }
@@ -622,16 +679,22 @@ static void handleBright() {
 static void handleVol() {
     if (g_web.hasArg("v"))    { g_volume = constrain((int)g_web.arg("v").toInt(), 0, 100); audio_set_volume(g_volume); }
     if (g_web.hasArg("mute")) { g_muted = g_web.arg("mute").toInt() != 0; audio_set_muted(g_muted); }
+    if (g_web.hasArg("quiet")) g_quietHours = g_web.arg("quiet").toInt() != 0;
+    if (g_web.hasArg("qstart")) g_quietStartMin = parseTimeToMinutes(g_web.arg("qstart"), g_quietStartMin);
+    if (g_web.hasArg("qend"))   g_quietEndMin   = parseTimeToMinutes(g_web.arg("qend"), g_quietEndMin);
     if (g_web.hasArg("save")) {
         Preferences p;
         p.begin("capsuleradar", false);
         p.putInt("vol", g_volume);
         p.putBool("mute", g_muted);
+        p.putBool("quiet", g_quietHours);
+        p.putInt("qstart", g_quietStartMin);
+        p.putInt("qend", g_quietEndMin);
         p.end();
     }
     if (g_web.hasArg("test")) {
         if (g_web.arg("test").toInt() == 2) audio_selftest();   // long tone, ignores mute
-        else audio_play(AUDIO_NEW);
+        else if (radarSoundAllowed()) audio_play(AUDIO_NEW);
     }
     g_web.send(200, "text/plain", "ok");
 }
@@ -734,6 +797,21 @@ static void handleTrail() {   // aircraft trail length 0/1/2/3 (live)
             Preferences p;
             p.begin("capsuleradar", false);
             p.putInt("traillen", g_trailLen);
+            p.end();
+        }
+    }
+    g_web.send(200, "text/plain", "ok");
+}
+
+static void handleTrackingFont() {   // aircraft floating label font size 0=small 1=medium 2=large (live)
+    if (g_web.hasArg("v")) {
+        g_trackingFontSize = constrain((int)g_web.arg("v").toInt(), 0, 2);
+        radar::setTrackingFontSize(g_trackingFontSize);
+        Serial.printf("[ui] tracking label font -> %d\n", g_trackingFontSize);
+        if (g_web.hasArg("save")) {
+            Preferences p;
+            p.begin("capsuleradar", false);
+            p.putInt("trackfont", g_trackingFontSize);
             p.end();
         }
     }
@@ -1406,6 +1484,7 @@ void setup() {
         radar::setSweepEnabled(g_showSweep);
         radar::setAirportsEnabled(g_showAirports);
         radar::setTrailLength(g_trailLen);
+        radar::setTrackingFontSize(g_trackingFontSize);
         display::setRotation((uint8_t)g_rotation);
         display::setRotationOffset((int8_t)g_rotationOffset);
     }
@@ -1484,6 +1563,7 @@ void setup() {
     g_web.on("/airports", handleAirports);
     g_web.on("/app", handleApp);
     g_web.on("/trail", handleTrail);
+    g_web.on("/tracking-font", handleTrackingFont);
     g_web.on("/rotate", handleRotate);
     g_web.on("/rotate-offset", handleRotateOffset);
     g_web.on("/gps", handleGps);

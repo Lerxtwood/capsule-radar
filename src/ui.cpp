@@ -206,7 +206,7 @@ void ui_set_range_km(float km) {
     s_rangeKm = km;
     if (s_zoomLbl) {
         char b[20];
-        snprintf(b, sizeof(b), LV_SYMBOL_LOOP " %.0f %s", dist_val(km), dist_unit());
+        snprintf(b, sizeof(b), "%.0f %s", dist_val(km), dist_unit());
         lv_label_set_text(s_zoomLbl, b);
     }
     int best = 0; float bd = 1e9f;                 // sync the cycle index to the shown range
@@ -611,10 +611,10 @@ void ui_create(void) {
 
     // on-screen range/zoom button (reliable single tap; bottom, above the 'S' marker)
     s_zoomBtn = lv_btn_create(s_tileRadar);
-    lv_obj_set_size(s_zoomBtn, 120, 44);
-    lv_obj_set_ext_click_area(s_zoomBtn, 18);   // invisibly enlarge the tap target (easier to hit)
-    lv_obj_align(s_zoomBtn, LV_ALIGN_BOTTOM_MID, 0, -32);
-    lv_obj_set_style_radius(s_zoomBtn, 18, 0);
+    lv_obj_set_size(s_zoomBtn, 74, 30);
+    lv_obj_set_ext_click_area(s_zoomBtn, 22);   // invisibly enlarge the tap target (easier to hit)
+    lv_obj_align(s_zoomBtn, LV_ALIGN_BOTTOM_MID, 0, -26);
+    lv_obj_set_style_radius(s_zoomBtn, 12, 0);
     lv_obj_set_style_bg_color(s_zoomBtn, UI_PANEL, 0);
     lv_obj_set_style_bg_opa(s_zoomBtn, 225, 0);
     lv_obj_set_style_border_color(s_zoomBtn, UI_GREEN, 0);
@@ -623,7 +623,7 @@ void ui_create(void) {
     lv_obj_clear_flag(s_zoomBtn, LV_OBJ_FLAG_SCROLL_CHAIN);  // tapping it must not swipe the tileview
     lv_obj_add_event_cb(s_zoomBtn, zoom_cb, LV_EVENT_PRESSED, NULL);  // fire on touch-down, not release
     s_zoomLbl = lv_label_create(s_zoomBtn);
-    lv_label_set_text(s_zoomLbl, LV_SYMBOL_LOOP " 30 km");
+    lv_label_set_text(s_zoomLbl, "30 km");
     lv_obj_set_style_text_font(s_zoomLbl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(s_zoomLbl, UI_GREEN, 0);
     lv_obj_center(s_zoomLbl);
