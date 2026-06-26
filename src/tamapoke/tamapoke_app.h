@@ -6,4 +6,5 @@
 bool tamapoke_begin();
 void tamapoke_loop();
 void tamapoke_set_rotation(uint8_t quarters);
+void tamapoke_set_dim_on_usb(bool enabled);
 bool tamapoke_consume_radar_request();

@@ -128,6 +128,7 @@ static const uint16_t STARS[][2] = { {120,140},{330,120},{370,210},{95,230},{280
 bool wasPressed = false;
 static volatile bool gRequestRadarApp = false;
 static uint8_t gTamaRotation = 0;
+static bool gDimOnUsb = false;
 // eleccion de inicial (primera partida): Bulbasaur / Charmander / Squirtle, 3 filas
 static const int16_t STARTER_DEX[3] = { 1, 4, 7 };
 #define STARTER_ROW_Y 110
@@ -396,6 +397,12 @@ void tamapoke_set_rotation(uint8_t quarters) {
   Serial.printf("[tamapoke] rotation -> %u\n", (unsigned)gTamaRotation);
 }
 
+void tamapoke_set_dim_on_usb(bool enabled) {
+  gDimOnUsb = enabled;
+  lastInteract = millis();
+  Serial.printf("[tamapoke] dim while plugged in -> %d\n", enabled ? 1 : 0);
+}
+
 bool tamapoke_consume_radar_request() {
   if (!gRequestRadarApp) return false;
   gRequestRadarApp = false;
@@ -409,8 +416,10 @@ void updateBrightness(uint32_t now) {
     lastInteract = now;
   }
   uint32_t idle = now - lastInteract;
-  dimStage = (idle > 300000) ? 2 : (idle > 90000) ? 1 : 0;
-  uint8_t target = pet.sleeping ? 25 : (usbPresent() ? 180 : 145);
+  const bool onUsb = usbPresent();
+  const bool allowIdleDim = !onUsb || gDimOnUsb;
+  dimStage = allowIdleDim ? ((idle > 300000) ? 2 : (idle > 90000) ? 1 : 0) : 0;
+  uint8_t target = pet.sleeping ? 25 : (onUsb ? 180 : 145);
   if (dimStage == 1) target = pet.sleeping ? 10 : 60;
   else if (dimStage == 2) target = 8;
   if (screenOff) target = 0;

@@ -56,6 +56,7 @@ static bool                  g_genericPhotos = true;                 // type-bas
 static int                   g_units = 0;                            // 0=Aviation 1=Metric 2=Imperial (web/NVS)
 static int                   g_appMode = 0;                          // 0=radar 1=TamaPoke (web/NVS)
 static int                   g_tamapokeRotation = 0;                 // TamaPoke rotation 0/1/2/3 = 0/90/180/270
+static bool                  g_tamapokeDimOnUsb = false;             // idle-dim TamaPoke even when plugged into USB
 static bool                  g_tamapokeReady = false;                // guest app initialized?
 static volatile int          g_pendingAppMode = -1;                  // defer app switches out of the web handler
 static volatile bool         g_pendingAppSave = false;               // save requested for deferred app switch
@@ -223,6 +224,7 @@ static void loadSettings() {
     appp.begin("cr_app", true);
     g_appMode = constrain(appp.getInt("mode", -1), -1, 1);
     g_tamapokeRotation = constrain(appp.getInt("rot", 0), 0, 3);
+    g_tamapokeDimOnUsb = appp.getBool("dimonusb", false);
     const bool appBootGuard = appp.getBool("bootguard", false);
     appp.end();
     if (g_appMode < 0) {
@@ -842,7 +844,10 @@ static bool activateApp(int mode) {
             return false;
         }
     }
-    if (mode == 1) tamapoke_set_rotation((uint8_t)g_tamapokeRotation);
+    if (mode == 1) {
+        tamapoke_set_rotation((uint8_t)g_tamapokeRotation);
+        tamapoke_set_dim_on_usb(g_tamapokeDimOnUsb);
+    }
     g_appMode = mode;
     if (g_appMode == 0) {
         display::invalidate();   // repaint over the last TamaPoke frame
@@ -971,6 +976,7 @@ static void handleTamapokePage() {
         ".t{color:#ff7ad9;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:10px;opacity:.9}"
         "label{display:block;margin:12px 0 4px;color:#e8b8ff;font-size:13px}"
         "select{width:100%%;box-sizing:border-box;padding:10px;border-radius:8px;border:1px solid #45345a;background:#130d1c;color:#fff;font-size:16px}"
+        ".ck{width:auto;display:inline;margin-right:8px;vertical-align:middle}"
         ".note{color:#bca8cc;font-size:12px;line-height:1.35;margin:8px 0 0}"
         ".ft{color:#8b7898;font-size:12px;text-align:center;margin-top:6px}.ft code{color:#e8b8ff}"
         "</style></head><body>"
@@ -978,11 +984,12 @@ static void handleTamapokePage() {
         "<nav class=nav><a href=/>Capsule-Radar</a><a class=on href=/tamapoke>TamaPoke</a><a href=/update>Firmware</a></nav>"
         "<div class=card><div class=t>Display</div>"
         "<label>TamaPoke screen rotation</label><select onchange='tr(this.value)'>%s</select>"
-        "<p class=note>This setting is saved now; the next step is wiring it into TamaPoke rendering and touch mapping.</p>"
+        "<label><input type=checkbox class=ck %s onchange='du(this.checked)'>Dim while plugged in</label>"
+        "<p class=note>When off, TamaPoke stays bright while USB power is connected. It still dims on battery to protect the display and save power.</p>"
         "<p class=note>Escape hatch: hold the top-center of the TamaPoke screen for about 2 seconds to return to Capsule Radar.</p>"
         "</div><p class=ft>Reach me at <code>capsuleradar.local</code> &middot; v" FW_VERSION "</p>"
-        "<script>function tr(v){fetch('/tamapoke/rotate?v='+v+'&save=1')}</script></body></html>",
-        ropts.c_str());
+        "<script>function tr(v){fetch('/tamapoke/rotate?v='+v+'&save=1')}function du(c){fetch('/tamapoke/dim-usb?v='+(c?1:0)+'&save=1')}</script></body></html>",
+        ropts.c_str(), g_tamapokeDimOnUsb ? "checked" : "");
     g_web.send(200, "text/html", buf);
 }
 
@@ -997,6 +1004,21 @@ static void handleTamapokeRotate() {
         }
         if (g_appMode == 1) tamapoke_set_rotation((uint8_t)g_tamapokeRotation);
         Serial.printf("[tamapoke] saved rotation -> %d\n", g_tamapokeRotation);
+    }
+    g_web.send(200, "text/plain", "ok");
+}
+
+static void handleTamapokeDimUsb() {
+    if (g_web.hasArg("v")) {
+        g_tamapokeDimOnUsb = g_web.arg("v").toInt() != 0;
+        if (g_web.hasArg("save")) {
+            Preferences p;
+            p.begin("cr_app", false);
+            p.putBool("dimonusb", g_tamapokeDimOnUsb);
+            p.end();
+        }
+        if (g_appMode == 1) tamapoke_set_dim_on_usb(g_tamapokeDimOnUsb);
+        Serial.printf("[tamapoke] saved dim-on-usb -> %d\n", g_tamapokeDimOnUsb ? 1 : 0);
     }
     g_web.send(200, "text/plain", "ok");
 }
@@ -1570,6 +1592,7 @@ void setup() {
     g_web.on("/units", handleUnits);
     g_web.on("/tamapoke", HTTP_GET, handleTamapokePage);
     g_web.on("/tamapoke/rotate", handleTamapokeRotate);
+    g_web.on("/tamapoke/dim-usb", handleTamapokeDimUsb);
     g_web.on("/update", HTTP_GET, handleUpdatePage);
     g_web.on("/enter-update-mode", HTTP_POST, handleEnterUpdateMode);
     g_web.on("/exit-update-mode", HTTP_POST, handleExitUpdateMode);
@@ -1715,8 +1738,9 @@ void loop() {
             snprintf(net, sizeof(net), "WiFi setup:\njoin CapsuleRadar-Setup");
         if (g_appMode == 0) ui_set_netinfo(net);
         const bool bpresent = battery_present();
+        const bool externalPower = battery_external_power();
         if (g_appMode == 0) ui_set_battery(battery_percent(), battery_charging(), bpresent);
-        g_onBattery = bpresent && !battery_charging();
+        g_onBattery = bpresent && !externalPower;
         // GPS HUD/Stats: 0 = off/no module (hidden), 1 = acquiring, 2 = fix
         const int gpsState = (!g_useGps || !gps_present()) ? 0 : (gps_has_fix() ? 2 : 1);
         if (g_appMode == 0) ui_set_gps(gpsState, gps_satellites());

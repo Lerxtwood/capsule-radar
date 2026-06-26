@@ -46,7 +46,7 @@ bool batCharging() {
 }
 
 bool usbPresent() {
-  return !battery_present() || battery_charging();
+  return battery_external_power() || !battery_present() || battery_charging();
 }
 
 void pwrSetup() {
