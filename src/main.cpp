@@ -20,6 +20,7 @@
 #include "rtc_pcf85063.h"            // PCF85063 RTC (offline clock + date)
 #include "audio.h"                   // ES8311 alert pings
 #include "tamapoke/tamapoke_app.h"   // guest pet app
+#include "tamapoke/sdmon.h"          // TamaPoke SD sprite loader (PUT/LS over serial)
 #include <set>                       // audio: track which contacts are in range
 #include <string>
 #include <WiFiManager.h>             // captive portal
@@ -62,6 +63,7 @@ static volatile int          g_pendingAppMode = -1;                  // defer ap
 static volatile bool         g_pendingAppSave = false;               // save requested for deferred app switch
 static bool                  g_tamapokeBootGuard = false;            // saved guest app boot is still proving itself
 static uint32_t              g_tamapokeBootGuardUntilMs = 0;
+static bool                  g_spriteLoaderSdStarted = false;        // lazy-mount SD when Web Serial uploads sprites
 static bool                  g_showAirports = true;                  // airport markers on/off (web/NVS)
 static int                   g_rotation = 0;                         // display rotation 0/1/2/3 = 0/90/180/270 (web/NVS)
 static int                   g_rotationOffset = 0;                   // fine display rotation adjustment, degrees (web/NVS)
@@ -1023,6 +1025,27 @@ static void handleTamapokeDimUsb() {
     g_web.send(200, "text/plain", "ok");
 }
 
+static void handleSpriteSerialLoader() {
+    // TamaPoke has its own serial console when it is active. This lightweight
+    // hook lets the first-time web installer copy sprites to SD while the
+    // device is still sitting in Capsule Radar.
+    if (g_appMode != 0 || !Serial.available()) return;
+
+    String line = Serial.readStringUntil('\n');
+    line.trim();
+    if (!(line.startsWith("PUT ") || line == "LS")) return;
+
+    if (!g_spriteLoaderSdStarted) {
+        g_spriteLoaderSdStarted = sdBegin();
+        Serial.printf("[sprite] SD loader %s\n", g_spriteLoaderSdStarted ? "ready" : "failed");
+    }
+    if (!g_spriteLoaderSdStarted) {
+        Serial.println("ERR");
+        return;
+    }
+    if (!sdSerialCommand(line)) Serial.println("ERR");
+}
+
 // ---- browser OTA: upload an app .bin over WiFi and self-flash ----
 static String jsonEscape(const String &s) {
     String out;
@@ -1644,6 +1667,7 @@ void loop() {
     else                tamapoke_loop();  // guest app owns direct full-screen drawing
     g_wm.process();                 // service the WiFi config portal (non-blocking)
     g_web.handleClient();           // serve the configuration web page
+    handleSpriteSerialLoader();     // first-time web installer can copy TamaPoke sprites
 
     if (g_appMode == 1 && tamapoke_consume_radar_request()) {
         persistAppMode(0);

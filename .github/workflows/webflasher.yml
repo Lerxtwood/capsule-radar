@@ -4,6 +4,8 @@ name: Deploy web installer
 #
 # The installer publishes a copy of the latest GitHub Release full-flash binary:
 #   CapsuleRadar-esp32s3.bin
+# and the TamaPoke sprite bundle:
+#   sprites.pak
 #
 # One-time setup in the repo:
 #   Settings -> Pages -> Source = "GitHub Actions"
@@ -43,6 +45,9 @@ jobs:
           curl -L --fail \
             -o site/CapsuleRadar-esp32s3.bin \
             "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/CapsuleRadar-esp32s3.bin"
+          curl -L --fail \
+            -o site/sprites.pak \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/sprites.pak"
 
       - uses: actions/upload-pages-artifact@v3
         with:

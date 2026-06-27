@@ -2,8 +2,8 @@
 
 # Push a tag like v1.0.0 to build the merged firmware and attach it to a GitHub
 # Release. The browser web installer mirrors CapsuleRadar-esp32s3.bin from the
-# latest release into GitHub Pages, while the device OTA updater consumes
-# CapsuleRadar-ota.bin plus manifest.json:
+# latest release into GitHub Pages, the sprite installer mirrors sprites.pak,
+# and the device OTA updater consumes CapsuleRadar-ota.bin plus manifest.json:
 #   git tag v1.0.0 && git push origin v1.0.0
 
 on:
@@ -41,6 +41,7 @@ jobs:
             0xe000  "$BOOT_APP0" \
             0x10000 "$B/firmware.bin"
           cp "$B/firmware.bin" CapsuleRadar-ota.bin   # app-only image for the device's web OTA page
+          curl -L --fail -o sprites.pak "https://socquique.github.io/TamaPoke/web/sprites.pak"
           OTA_SHA="$(sha256sum CapsuleRadar-ota.bin | awk '{print $1}')"
           OTA_SIZE="$(stat -c%s CapsuleRadar-ota.bin)"
           TAG="${GITHUB_REF_NAME}"
@@ -63,6 +64,7 @@ jobs:
             CapsuleRadar-esp32s3.bin
             CapsuleRadar-ota.bin
             manifest.json
+            sprites.pak
           generate_release_notes: true
           body: |
             **First flash (USB):** `CapsuleRadar-esp32s3.bin` — the full merged image (offset `0x0`).
@@ -72,4 +74,6 @@ jobs:
             **Update over WiFi (no cable):** `CapsuleRadar-ota.bin` — the app-only image.
             Open `http://capsuleradar.local/update` on the device and upload this file.
             (Do **not** upload the merged image there.)
+
+            **TamaPoke sprites:** `sprites.pak` — optional SD-card sprite bundle used by the browser installer.
 

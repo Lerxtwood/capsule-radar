@@ -55,6 +55,29 @@
     font-weight: 800;
     cursor: pointer;
   }
+  button.secondary {
+    background: #132319;
+    border: 1px solid #2d5140;
+    color: var(--soft);
+  }
+  button:disabled { opacity: .48; cursor: not-allowed; }
+  .actions { display:flex; flex-wrap:wrap; gap:10px; justify-content:center; margin:16px 0 8px; }
+  .bar { display:none; height:10px; background:#0b160f; border:1px solid #254433; border-radius:999px; overflow:hidden; margin-top:14px; }
+  .bar > div { width:0%; height:100%; background:linear-gradient(90deg,var(--green),var(--pink)); transition:width .15s ease; }
+  pre {
+    display:none;
+    text-align:left;
+    white-space:pre-wrap;
+    max-height:190px;
+    overflow:auto;
+    background:#07110b;
+    border:1px solid #1f3a2b;
+    border-radius:12px;
+    color:var(--soft);
+    padding:12px;
+    font-size:12px;
+    line-height:1.45;
+  }
   ol, ul { text-align: left; color: var(--soft); font-size: 14px; line-height: 1.62; padding-left: 22px; }
   code { background:#0c1a12; padding:2px 6px; border-radius:6px; color:var(--ink); }
   .note { color:var(--muted); font-size:12px; line-height:1.45; margin-top:14px; }
@@ -141,14 +164,20 @@
     <div class="card">
       <h2>3. TamaPoke sprites</h2>
       <p>
-        The combined firmware already supports TamaPoke sprites from the microSD card.
-        The browser sprite loader is the next piece to wire into this page.
+        Copy the optional TamaPoke sprite pack to the microSD card over USB.
+        Leave the device plugged in and keep this tab open until it finishes.
       </p>
-      <ul>
-        <li>Firmware-side serial SD loading support is present.</li>
-        <li>The next iteration will fetch sprite assets and copy them to <code>/mons</code> on the SD card.</li>
-      </ul>
-      <p class="note">For now, install the firmware here, then we'll add the one-click sprite copy flow after the first flasher test.</p>
+      <div class="actions">
+        <button id="spriteConnect" class="secondary">Connect for sprites</button>
+        <button id="spriteList" class="secondary" disabled>List SD sprites</button>
+        <button id="spriteLoad" disabled>Load sprites</button>
+      </div>
+      <div id="spriteBar" class="bar"><div></div></div>
+      <pre id="spriteLog"></pre>
+      <p class="note">
+        This uses Web Serial and the firmware's <code>PUT</code> loader. If you just installed firmware,
+        wait for the board to reboot before connecting here.
+      </p>
     </div>
 
     <div class="note">
@@ -156,5 +185,163 @@
       Source: <a href="https://github.com/Lerxtwood/capsule-radar">github.com/Lerxtwood/capsule-radar</a>
     </div>
   </div>
+<script>
+(() => {
+  const connectBtn = document.getElementById('spriteConnect');
+  const listBtn = document.getElementById('spriteList');
+  const loadBtn = document.getElementById('spriteLoad');
+  const logEl = document.getElementById('spriteLog');
+  const bar = document.getElementById('spriteBar');
+  const fill = bar.firstElementChild;
+  const enc = new TextEncoder();
+  const dec = new TextDecoder();
+  let port, reader, writer, lineBuf = '';
+
+  function log(msg) {
+    logEl.style.display = 'block';
+    logEl.textContent += msg + '\n';
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  async function readLine(timeoutMs = 6000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const nl = lineBuf.indexOf('\n');
+      if (nl >= 0) {
+        const line = lineBuf.slice(0, nl).trim();
+        lineBuf = lineBuf.slice(nl + 1);
+        return line;
+      }
+      const remaining = deadline - Date.now();
+      const readPromise = reader.read();
+      const timeoutPromise = new Promise(resolve => setTimeout(() => resolve({ timeout:true }), remaining));
+      const result = await Promise.race([readPromise, timeoutPromise]);
+      if (result.timeout || result.done) return null;
+      lineBuf += dec.decode(result.value);
+    }
+    return null;
+  }
+
+  async function waitFor(token, timeoutMs = 6000) {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const line = await readLine(deadline - Date.now());
+      if (line === null) return false;
+      if (line === token) return true;
+      if (line === 'ERR') return false;
+      if (line) log('  ' + line);
+    }
+    return false;
+  }
+
+  async function commandLine(line, doneTimeout = 6000) {
+    await writer.write(enc.encode(line + '\n'));
+    const lines = [];
+    const deadline = Date.now() + doneTimeout;
+    while (Date.now() < deadline) {
+      const l = await readLine(deadline - Date.now());
+      if (l === null) break;
+      if (l === 'DONE') return lines;
+      if (l === 'ERR') throw new Error(line + ' returned ERR');
+      if (l) lines.push(l);
+    }
+    throw new Error(line + ' timed out');
+  }
+
+  async function sendOne(name, data) {
+    await writer.write(enc.encode(`PUT ${name} ${data.length}\n`));
+    if (!await waitFor('OK')) return false;
+    for (let i = 0; i < data.length; i += 2048) {
+      await writer.write(data.slice(i, i + 2048));
+      if (!await waitFor('#')) return false;
+    }
+    return await waitFor('DONE', 30000);
+  }
+
+  function parsePak(buf) {
+    const dv = new DataView(buf);
+    if (dec.decode(new Uint8Array(buf, 0, 4)) !== 'TPAK') throw new Error('invalid sprite bundle');
+    const count = dv.getUint16(4, true);
+    let off = 6;
+    const items = [];
+    for (let i = 0; i < count; i++) {
+      const nameLen = dv.getUint8(off); off += 1;
+      const name = dec.decode(new Uint8Array(buf, off, nameLen)); off += nameLen;
+      const size = dv.getUint32(off, true); off += 4;
+      items.push({ name, size });
+    }
+    let pos = off;
+    for (const it of items) {
+      it.data = new Uint8Array(buf, pos, it.size);
+      pos += it.size;
+    }
+    return items;
+  }
+
+  async function sendAll(items) {
+    bar.style.display = 'block';
+    fill.style.width = '0%';
+    let ok = 0;
+    for (let i = 0; i < items.length; i++) {
+      const it = items[i];
+      log(`Sending ${i + 1}/${items.length}: ${it.name} (${Math.round(it.data.length / 1024)} KB)`);
+      if (!await sendOne(it.name, it.data)) throw new Error('failed ' + it.name);
+      ok++;
+      fill.style.width = ((i + 1) / items.length * 100).toFixed(1) + '%';
+    }
+    log(`Done. Installed ${ok}/${items.length} sprite files. Restart or switch to TamaPoke to use them.`);
+  }
+
+  connectBtn.onclick = async () => {
+    if (!('serial' in navigator)) {
+      log('Web Serial is not available. Use Chrome or Edge on desktop.');
+      return;
+    }
+    try {
+      port = await navigator.serial.requestPort();
+      await port.open({ baudRate: 115200 });
+      reader = port.readable.getReader();
+      writer = port.writable.getWriter();
+      lineBuf = '';
+      connectBtn.disabled = true;
+      listBtn.disabled = false;
+      loadBtn.disabled = false;
+      log('Connected. You can list the SD card or load the sprite pack.');
+    } catch (e) {
+      log('Could not connect: ' + e.message);
+    }
+  };
+
+  listBtn.onclick = async () => {
+    if (!writer) return log('Connect first.');
+    listBtn.disabled = true;
+    try {
+      log('Listing /mons...');
+      const lines = await commandLine('LS', 12000);
+      log(lines.length ? lines.join('\n') : '(empty)');
+    } catch (e) {
+      log('List failed: ' + e.message);
+    } finally {
+      listBtn.disabled = false;
+    }
+  };
+
+  loadBtn.onclick = async () => {
+    if (!writer) return log('Connect first.');
+    loadBtn.disabled = true;
+    try {
+      log('Downloading sprites.pak...');
+      const resp = await fetch('sprites.pak');
+      if (!resp.ok) throw new Error('HTTP ' + resp.status);
+      const items = parsePak(await resp.arrayBuffer());
+      log(`${items.length} files in sprite pack. Starting transfer...`);
+      await sendAll(items);
+    } catch (e) {
+      log('Load failed: ' + e.message);
+      loadBtn.disabled = false;
+    }
+  };
+})();
+</script>
 </body>
 </html>
