@@ -1040,10 +1040,14 @@ static void handleSpriteSerialLoader() {
         Serial.printf("[sprite] SD loader %s\n", g_spriteLoaderSdStarted ? "ready" : "failed");
     }
     if (!g_spriteLoaderSdStarted) {
+        Serial.println("SD_MOUNT_FAILED");
         Serial.println("ERR");
         return;
     }
-    if (!sdSerialCommand(line)) Serial.println("ERR");
+    if (!sdSerialCommand(line)) {
+        Serial.println("UNKNOWN_COMMAND");
+        Serial.println("ERR");
+    }
 }
 
 // ---- browser OTA: upload an app .bin over WiFi and self-flash ----

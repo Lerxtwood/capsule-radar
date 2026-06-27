@@ -209,24 +209,34 @@ bool sdSerialCommand(const String &line) {
     int sp = line.lastIndexOf(' ');
     String path = line.substring(4, sp);
     uint32_t size = line.substring(sp + 1).toInt();
-    if (!sdReady || size == 0 || size > 4 * 1024 * 1024) {
+    if (!sdReady) {
+      Serial.println("SD_NOT_READY");
+      Serial.println("ERR");
+      return true;
+    }
+    if (size == 0 || size > 4 * 1024 * 1024) {
+      Serial.println("BAD_SIZE");
       Serial.println("ERR");
       return true;
     }
     if (!path.startsWith("/")) path = "/" + path;
     File f = SD_MMC.open(path, FILE_WRITE);
     if (!f) {
+      Serial.println("OPEN_FAILED");
       Serial.println("ERR");
       return true;
     }
     Serial.println("OK");
-    static uint8_t buf[2048];
+    static uint8_t buf[8192];
     uint32_t remaining = size;
     Serial.setTimeout(5000);
     while (remaining > 0) {
       size_t want = remaining > sizeof(buf) ? sizeof(buf) : remaining;
       size_t n = Serial.readBytes(buf, want);
-      if (n == 0) break;  // timeout
+      if (n == 0) {
+        Serial.println("READ_TIMEOUT");
+        break;
+      }
       f.write(buf, n);
       remaining -= n;
       Serial.println("#");  // ack: listo para el siguiente bloque

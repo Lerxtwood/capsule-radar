@@ -221,6 +221,7 @@
   const barText = bar.querySelector('span');
   const enc = new TextEncoder();
   const dec = new TextDecoder();
+  const SPRITE_CHUNK_SIZE = 8192;
   let port, reader, writer, lineBuf = '';
 
   function log(msg) {
@@ -274,17 +275,35 @@
     throw new Error(line + ' timed out');
   }
 
-  function setSpriteProgress(sent, total) {
+  function formatBytes(bytes) {
+    if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB';
+    if (bytes >= 1024) return (bytes / 1024).toFixed(0) + ' KB';
+    return bytes + ' B';
+  }
+
+  function formatTime(seconds) {
+    if (!isFinite(seconds) || seconds < 0) return '--';
+    if (seconds < 60) return Math.round(seconds) + 's';
+    const m = Math.floor(seconds / 60);
+    const s = Math.round(seconds % 60);
+    return `${m}m ${s}s`;
+  }
+
+  function setSpriteProgress(sent, total, startedAt = 0) {
     const pct = total > 0 ? Math.min(100, sent / total * 100) : 0;
     fill.style.width = pct.toFixed(1) + '%';
-    barText.textContent = `${pct.toFixed(1)}% (${Math.round(sent / 1048576)} / ${Math.round(total / 1048576)} MB)`;
+    const elapsed = startedAt ? (Date.now() - startedAt) / 1000 : 0;
+    const bps = elapsed > 0.5 ? sent / elapsed : 0;
+    const eta = bps > 0 ? (total - sent) / bps : Infinity;
+    const speed = bps > 0 ? `${formatBytes(bps)}/s` : '--';
+    barText.textContent = `${pct.toFixed(1)}% (${formatBytes(sent)} / ${formatBytes(total)}) ${speed} ETA ${formatTime(eta)}`;
   }
 
   async function sendOne(name, data, progress) {
     await writer.write(enc.encode(`PUT ${name} ${data.length}\n`));
     if (!await waitFor('OK')) return false;
-    for (let i = 0; i < data.length; i += 2048) {
-      const chunk = data.slice(i, i + 2048);
+    for (let i = 0; i < data.length; i += SPRITE_CHUNK_SIZE) {
+      const chunk = data.slice(i, i + SPRITE_CHUNK_SIZE);
       await writer.write(chunk);
       if (!await waitFor('#')) return false;
       progress(chunk.length);
@@ -316,7 +335,8 @@
     bar.style.display = 'block';
     const totalBytes = items.reduce((sum, it) => sum + it.data.length, 0);
     let sentBytes = 0;
-    setSpriteProgress(0, totalBytes);
+    const startedAt = Date.now();
+    setSpriteProgress(0, totalBytes, startedAt);
     let ok = 0;
     for (let i = 0; i < items.length; i++) {
       const it = items[i];
@@ -324,15 +344,15 @@
       const before = sentBytes;
       if (!await sendOne(it.name, it.data, n => {
         sentBytes += n;
-        setSpriteProgress(sentBytes, totalBytes);
+        setSpriteProgress(sentBytes, totalBytes, startedAt);
       })) {
         sentBytes = before;
-        setSpriteProgress(sentBytes, totalBytes);
+        setSpriteProgress(sentBytes, totalBytes, startedAt);
         throw new Error('failed ' + it.name);
       }
       ok++;
     }
-    setSpriteProgress(totalBytes, totalBytes);
+    setSpriteProgress(totalBytes, totalBytes, startedAt);
     log(`Done. Installed ${ok}/${items.length} sprite files. Restart or switch to TamaPoke to use them.`);
   }
 
