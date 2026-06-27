@@ -86,6 +86,7 @@ static bool       s_airportsEnabled = true;
 static int        s_trailMax        = TRAIL_MAX;   // per-aircraft trail length (0 = off)
 static int        s_flowMax         = FLOW_MAX;    // persistent flow-layer segments, count cap (0 = off)
 static int        s_flowGenMax      = 14;          // ...and an age cap in polls (~2 s each) so tracks fade out
+static int        s_trackingFontSize = 0;          // 0=small/current 1=medium 2=large
 static lv_timer_t *s_timer    = nullptr;
 static float       s_sweepDeg = 0.0f;
 static float       s_prevSweepDeg = 0.0f;
@@ -127,6 +128,30 @@ static const float GX[4] = { 0.0f,  7.0f, 0.0f, -7.0f };
 static const float GY[4] = { -11.0f, 5.0f, 8.0f, 5.0f };
 
 static inline bool orb() { return s_theme == THEME_ORB; }
+
+static const lv_font_t *trackingCallFont() {
+    switch (s_trackingFontSize) {
+        case 2: return &lv_font_montserrat_16;
+        case 1: return &lv_font_montserrat_16;
+        default: return &lv_font_montserrat_14;
+    }
+}
+
+static const lv_font_t *trackingDetailFont() {
+    switch (s_trackingFontSize) {
+        case 2: return &lv_font_montserrat_16;
+        case 1: return &lv_font_montserrat_14;
+        default: return &lv_font_montserrat_12;
+    }
+}
+
+static int trackingLineH() {
+    switch (s_trackingFontSize) {
+        case 2: return 21;
+        case 1: return 18;
+        default: return 16;
+    }
+}
 
 static void show(lv_obj_t *o, bool v) {
     if (!o) return;
@@ -507,18 +532,27 @@ static void ac_draw_cb(lv_event_t *e) {
 
         // floating labels (phosphor only; orb keeps clean balls + the tap card)
         if (!drg) {
+            const int lineH = trackingLineH();
+            const int topY = -20 - (s_trackingFontSize * 3);
+            const int labelW = (s_trackingFontSize == 2) ? 170 : ((s_trackingFontSize == 1) ? 155 : 130);
             lv_draw_label_dsc_t lc;
             lv_draw_label_dsc_init(&lc);
-            lc.font = &lv_font_montserrat_14;
+            lc.font = trackingCallFont();
             lc.color = s_cInk;
-            lv_area_t a1 = { (lv_coord_t)(ac.pos.x + 12), (lv_coord_t)(ac.pos.y - 14),
-                             (lv_coord_t)(ac.pos.x + 142), (lv_coord_t)(ac.pos.y + 2) };
+            lv_area_t a1 = { (lv_coord_t)(ac.pos.x + 12), (lv_coord_t)(ac.pos.y + topY),
+                             (lv_coord_t)(ac.pos.x + 12 + labelW), (lv_coord_t)(ac.pos.y + topY + lineH) };
             if (ac.call[0]) lv_draw_label(d, &lc, &a1, ac.call, NULL);
+            lv_draw_label_dsc_t lt;
+            lv_draw_label_dsc_init(&lt);
+            lt.font = trackingDetailFont();
+            lt.color = s_cInk;
+            lv_area_t at = { a1.x1, (lv_coord_t)(a1.y1 + lineH), a1.x2, (lv_coord_t)(a1.y1 + lineH * 2) };
+            if (ac.type[0]) lv_draw_label(d, &lt, &at, ac.type, NULL);
             lv_draw_label_dsc_t la;
             lv_draw_label_dsc_init(&la);
-            la.font = &lv_font_montserrat_12;
+            la.font = trackingDetailFont();
             la.color = ac.color;
-            lv_area_t a2 = { a1.x1, (lv_coord_t)(ac.pos.y + 2), a1.x2, (lv_coord_t)(ac.pos.y + 20) };
+            lv_area_t a2 = { a1.x1, (lv_coord_t)(a1.y1 + lineH * 2), a1.x2, (lv_coord_t)(a1.y1 + lineH * 3) };
             if (ac.altTxt[0]) lv_draw_label(d, &la, &a2, ac.altTxt, NULL);
         }
     }
@@ -632,6 +666,13 @@ void setTrailLength(int level) {
     flow_redraw_all();                              // repaint the flow canvas at the new length
     if (s_acLayer) lv_obj_invalidate(s_acLayer);
 }
+
+void setTrackingFontSize(int level) {
+    s_trackingFontSize = constrain(level, 0, 2);
+    if (s_acLayer) lv_obj_invalidate(s_acLayer);
+}
+
+int trackingFontSize() { return s_trackingFontSize; }
 
 void setPrefetching(const char *hex, bool active) {
     if (!hex || !hex[0]) return;
@@ -894,6 +935,12 @@ static void fill_info(const AcDraw &a, AcInfo &out) {
 void select(int idx) {
     if (idx < 0 || idx >= (int)s_acs.size()) s_selHex.clear();
     else s_selHex = s_acs[idx].hex;
+    if (s_acLayer) lv_obj_invalidate(s_acLayer);
+}
+
+void selectHex(const char *hex) {
+    if (!hex || !hex[0]) s_selHex.clear();
+    else s_selHex = hex;
     if (s_acLayer) lv_obj_invalidate(s_acLayer);
 }
 

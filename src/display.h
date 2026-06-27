@@ -4,6 +4,8 @@
 // Touch (CST9217 indev) and the radar UI come in later milestones.
 #include <stdint.h>
 
+class Arduino_CO5300;
+
 namespace display {
 
 // Init the panel and LVGL (draw buffers in PSRAM) and show the M0 hello screen.
@@ -15,6 +17,13 @@ void loop();
 
 // 0..255 panel brightness (CO5300 command 0x51).
 void setBrightness(uint8_t v);
+
+// Raw initialized panel for isolated non-LVGL full-screen apps. The display
+// module still owns the panel; callers must only draw while LVGL rendering is paused.
+Arduino_CO5300 *rawPanel();
+
+// Force LVGL to repaint the full active screen on the next display::loop().
+void invalidate();
 
 // ms since the last touch (LVGL inactivity timer) — for idle auto-dim.
 uint32_t inactiveMs();

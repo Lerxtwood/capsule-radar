@@ -15,6 +15,7 @@ bool battery_begin() {
     if (s_ok) {
         PMU.enableBattDetection();
         PMU.enableBattVoltageMeasure();
+        PMU.enableVbusVoltageMeasure();
         Serial.println("[batt] AXP2101 ready");
     } else {
         Serial.println("[batt] AXP2101 not found");
@@ -25,6 +26,7 @@ bool battery_begin() {
 bool battery_present()  { return s_ok && PMU.isBatteryConnect(); }
 int  battery_percent()  { return s_ok ? PMU.getBatteryPercent() : -1; }
 bool battery_charging() { return s_ok && PMU.isCharging(); }
+bool battery_external_power() { return s_ok && PMU.isVbusIn(); }
 
 void battery_enable_codec_rail() {
     if (!s_ok) return;

@@ -284,6 +284,11 @@ bool begin() {
 void loop() { lv_timer_handler(); }
 
 void setBrightness(uint8_t v) { if (s_gfx) s_gfx->setBrightness(v); }
+Arduino_CO5300 *rawPanel() { return s_gfx; }
+void invalidate() {
+    lv_obj_t *scr = lv_scr_act();
+    if (scr) lv_obj_invalidate(scr);
+}
 
 void setRotation(uint8_t quarters) {
     s_rot = (uint8_t)(quarters & 3);   // 0..3 = 0°/90°/180°/270°

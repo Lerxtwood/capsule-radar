@@ -1,7 +1,9 @@
-name: Release firmware
+﻿name: Release firmware
 
 # Push a tag like v1.0.0 to build the merged firmware and attach it to a GitHub
-# Release (a single .bin makers can flash with esptool or the web flasher):
+# Release. The browser web installer mirrors CapsuleRadar-esp32s3.bin from the
+# latest release into GitHub Pages, while the device OTA updater consumes
+# CapsuleRadar-ota.bin plus manifest.json:
 #   git tag v1.0.0 && git push origin v1.0.0
 
 on:
@@ -39,6 +41,20 @@ jobs:
             0xe000  "$BOOT_APP0" \
             0x10000 "$B/firmware.bin"
           cp "$B/firmware.bin" CapsuleRadar-ota.bin   # app-only image for the device's web OTA page
+          OTA_SHA="$(sha256sum CapsuleRadar-ota.bin | awk '{print $1}')"
+          OTA_SIZE="$(stat -c%s CapsuleRadar-ota.bin)"
+          TAG="${GITHUB_REF_NAME}"
+          cat > manifest.json <<EOF
+          {
+            "version": "${TAG#v}",
+            "board": "esp32-s3-amoled-175",
+            "firmware": "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/CapsuleRadar-ota.bin",
+            "sha256": "${OTA_SHA}",
+            "size": ${OTA_SIZE},
+            "commit": "${GITHUB_SHA::7}",
+            "builtAtUtc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          }
+          EOF
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
@@ -46,12 +62,14 @@ jobs:
           files: |
             CapsuleRadar-esp32s3.bin
             CapsuleRadar-ota.bin
+            manifest.json
           generate_release_notes: true
           body: |
             **First flash (USB):** `CapsuleRadar-esp32s3.bin` — the full merged image (offset `0x0`).
-            - Browser, no toolchain: https://socquique.github.io/capsule-radar/
+            - Browser, no toolchain: https://lerxtwood.github.io/capsule-radar/
             - Or: `esptool.py --chip esp32s3 write_flash 0x0 CapsuleRadar-esp32s3.bin`
 
             **Update over WiFi (no cable):** `CapsuleRadar-ota.bin` — the app-only image.
             Open `http://capsuleradar.local/update` on the device and upload this file.
             (Do **not** upload the merged image there.)
+
