@@ -1033,11 +1033,18 @@ static void handleSpriteSerialLoader() {
 
     String line = Serial.readStringUntil('\n');
     line.trim();
-    if (!(line.startsWith("PUT ") || line == "LS")) return;
+    if (!(line.startsWith("PUT ") || line == "LS" || line == "HELLO")) return;
 
     // While the browser is doing Web Serial file transfer, keep the shared
     // serial stream quiet and avoid background network work competing for time.
     g_firmwareUpdateInProgress = true;
+
+    if (line == "HELLO") {
+        Serial.println("SPRITE_LOADER_READY");
+        Serial.println("DONE");
+        g_firmwareUpdateInProgress = false;
+        return;
+    }
 
     if (!g_spriteLoaderSdStarted) {
         g_spriteLoaderSdStarted = sdBegin();

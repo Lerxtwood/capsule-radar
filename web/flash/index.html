@@ -275,6 +275,35 @@
     throw new Error(line + ' timed out');
   }
 
+  function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async function waitForSpriteLoader() {
+    const deadline = Date.now() + 30000;
+    let tries = 0;
+    while (Date.now() < deadline) {
+      tries++;
+      lineBuf = ''; // drop boot chatter and stale serial logs before each probe
+      try {
+        await writer.write(enc.encode('HELLO\n'));
+        const lines = [];
+        const probeDeadline = Date.now() + 2500;
+        while (Date.now() < probeDeadline) {
+          const l = await readLine(probeDeadline - Date.now());
+          if (l === null) break;
+          if (l === 'DONE' && lines.includes('SPRITE_LOADER_READY')) return true;
+          if (l && !l.startsWith('[') && !l.startsWith('ESP-ROM')) lines.push(l);
+        }
+      } catch (_) {
+        // The board may be rebooting because opening Web Serial toggled reset.
+      }
+      if (tries === 1) log('Waiting for the device to finish booting...');
+      await sleep(1000);
+    }
+    return false;
+  }
+
   function formatBytes(bytes) {
     if (bytes >= 1048576) return (bytes / 1048576).toFixed(1) + ' MB';
     if (bytes >= 1024) return (bytes / 1024).toFixed(0) + ' KB';
@@ -368,9 +397,13 @@
       writer = port.writable.getWriter();
       lineBuf = '';
       connectBtn.disabled = true;
+      listBtn.disabled = true;
+      loadBtn.disabled = true;
+      log('Connected. Probing sprite loader...');
+      if (!await waitForSpriteLoader()) throw new Error('sprite loader did not become ready');
       listBtn.disabled = false;
       loadBtn.disabled = false;
-      log('Connected. You can list the SD card or load the sprite pack.');
+      log('Sprite loader ready. You can list the SD card or load the sprite pack.');
     } catch (e) {
       log('Could not connect: ' + e.message);
     }
