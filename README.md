@@ -55,10 +55,10 @@ On first flash you may need to hold **BOOT** then tap **RESET**. After flashing,
 
 Makers can flash without installing anything using **ESP Web Tools** (Chrome or Edge on desktop):
 
-1. Open the **[web flasher](https://socquique.github.io/capsule-radar/)** (the project's GitHub Pages site).
+1. Open the **[web installer](https://lerxtwood.github.io/capsule-radar/)** (the project's GitHub Pages site).
 2. Plug the board in with a USB-C **data** cable and click **Install**.
 
-The flasher is built and published automatically by GitHub Actions ([`.github/workflows/webflasher.yml`](.github/workflows/webflasher.yml)) on every push to `main` — enable it once in **Settings → Pages → Source = GitHub Actions**. Tagged releases (`git tag v1.0.0 && git push origin v1.0.0`) also attach a ready-to-flash `CapsuleRadar-esp32s3.bin` to a **GitHub Release** via [`release.yml`](.github/workflows/release.yml). To preview the flasher locally:
+The installer page is published by GitHub Actions ([`.github/workflows/webflasher.yml`](.github/workflows/webflasher.yml)) and uses the latest GitHub Release `CapsuleRadar-esp32s3.bin` full-flash image. Enable Pages once in **Settings -> Pages -> Source = GitHub Actions**. Tagged releases (`git tag v1.0.0 && git push origin v1.0.0`) attach both the full-flash image and the OTA image via [`release.yml`](.github/workflows/release.yml). To preview the flasher locally:
 
 ```bash
 ./scripts/build_webflasher.sh                      # build + merge into web/flash/
@@ -95,8 +95,8 @@ src/
   route*.* route.*   origin→destination lookup (adsbdb)
   sim_main.cpp       native SDL simulator (not flashed)
 include/lv_conf.h    LVGL config (v8)
-web/flash/           browser web-flasher (ESP Web Tools) for makers
-scripts/             build_webflasher.sh (merge firmware -> single .bin)
+web/flash/           browser web installer (ESP Web Tools) for makers
+scripts/             build_webflasher.sh (optional local merged .bin helper)
 docs/                hardware / data-source / architecture notes
 ```
 

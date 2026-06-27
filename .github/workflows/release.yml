@@ -1,7 +1,9 @@
-name: Release firmware
+﻿name: Release firmware
 
 # Push a tag like v1.0.0 to build the merged firmware and attach it to a GitHub
-# Release (a single .bin makers can flash with esptool or the web flasher):
+# Release. The browser web installer mirrors CapsuleRadar-esp32s3.bin from the
+# latest release into GitHub Pages, while the device OTA updater consumes
+# CapsuleRadar-ota.bin plus manifest.json:
 #   git tag v1.0.0 && git push origin v1.0.0
 
 on:
@@ -64,9 +66,10 @@ jobs:
           generate_release_notes: true
           body: |
             **First flash (USB):** `CapsuleRadar-esp32s3.bin` — the full merged image (offset `0x0`).
-            - Browser, no toolchain: https://socquique.github.io/capsule-radar/
+            - Browser, no toolchain: https://lerxtwood.github.io/capsule-radar/
             - Or: `esptool.py --chip esp32s3 write_flash 0x0 CapsuleRadar-esp32s3.bin`
 
             **Update over WiFi (no cable):** `CapsuleRadar-ota.bin` — the app-only image.
             Open `http://capsuleradar.local/update` on the device and upload this file.
             (Do **not** upload the merged image there.)
+

@@ -1,6 +1,6 @@
 {
-  "name": "Capsule Radar",
-  "version": "__FWVER__",
+  "name": "Capsule Radar + TamaPoke",
+  "version": "latest",
   "new_install_prompt_erase": true,
   "builds": [
     {

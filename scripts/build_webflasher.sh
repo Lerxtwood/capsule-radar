@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Build the firmware and produce a single merged binary for the browser web-flasher
-# (web/flash/). Run locally to preview the flasher before pushing; CI does the same.
+# Build the firmware and produce a single merged binary for local browser-flasher
+# testing. The published GitHub Pages installer normally points at the latest
+# GitHub Release binary instead of committing this generated .bin.
 #
 #   ./scripts/build_webflasher.sh
 #   then serve it over HTTPS/localhost, e.g.:  python3 -m http.server -d web/flash 8000
@@ -31,3 +32,4 @@ mkdir -p web/flash
   0x10000 "$B/firmware.bin"
 
 echo "==> Done: $OUT ($(du -h "$OUT" | cut -f1))"
+echo "==> Note: published web/flash/manifest.json uses the latest GitHub Release asset."
