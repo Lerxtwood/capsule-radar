@@ -1035,6 +1035,10 @@ static void handleSpriteSerialLoader() {
     line.trim();
     if (!(line.startsWith("PUT ") || line == "LS")) return;
 
+    // While the browser is doing Web Serial file transfer, keep the shared
+    // serial stream quiet and avoid background network work competing for time.
+    g_firmwareUpdateInProgress = true;
+
     if (!g_spriteLoaderSdStarted) {
         g_spriteLoaderSdStarted = sdBegin();
         Serial.printf("[sprite] SD loader %s\n", g_spriteLoaderSdStarted ? "ready" : "failed");
@@ -1042,12 +1046,14 @@ static void handleSpriteSerialLoader() {
     if (!g_spriteLoaderSdStarted) {
         Serial.println("SD_MOUNT_FAILED");
         Serial.println("ERR");
+        g_firmwareUpdateInProgress = false;
         return;
     }
     if (!sdSerialCommand(line)) {
         Serial.println("UNKNOWN_COMMAND");
         Serial.println("ERR");
     }
+    g_firmwareUpdateInProgress = false;
 }
 
 // ---- browser OTA: upload an app .bin over WiFi and self-flash ----
@@ -1496,6 +1502,7 @@ static void setupFirmwareUpdateMode() {
 
 void setup() {
     Serial.begin(115200);
+    Serial.setRxBufferSize(16384);  // Web Serial sprite installer sends 8 KB chunks
     delay(200);
     Serial.println("\nCapsule Radar boot");
     if (firmwareUpdateModeSaved()) {

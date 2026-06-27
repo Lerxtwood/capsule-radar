@@ -256,7 +256,7 @@
       if (line === null) return false;
       if (line === token) return true;
       if (line === 'ERR') return false;
-      if (line) log('  ' + line);
+      if (line && !line.startsWith('[')) log('  ' + line);
     }
     return false;
   }
@@ -270,7 +270,7 @@
       if (l === null) break;
       if (l === 'DONE') return lines;
       if (l === 'ERR') throw new Error(line + ' returned ERR');
-      if (l) lines.push(l);
+      if (l && !l.startsWith('[')) lines.push(l);
     }
     throw new Error(line + ' timed out');
   }
