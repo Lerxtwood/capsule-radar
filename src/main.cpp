@@ -1509,7 +1509,6 @@ static void setupFirmwareUpdateMode() {
 
 void setup() {
     Serial.begin(115200);
-    Serial.setRxBufferSize(16384);  // Web Serial sprite installer sends 8 KB chunks
     delay(200);
     Serial.println("\nCapsule Radar boot");
     if (firmwareUpdateModeSaved()) {

@@ -221,7 +221,7 @@
   const barText = bar.querySelector('span');
   const enc = new TextEncoder();
   const dec = new TextDecoder();
-  const SPRITE_CHUNK_SIZE = 8192;
+  const SPRITE_CHUNK_SIZE = 4096;
   let port, reader, writer, lineBuf = '';
 
   function log(msg) {
