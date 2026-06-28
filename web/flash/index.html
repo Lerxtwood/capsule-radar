@@ -47,15 +47,17 @@
     --esp-tools-button-color: #04140b;
     --esp-tools-button-background-color: var(--green);
   }
-  button {
+  button, a.button {
     border: 0;
     border-radius: 12px;
     padding: 13px 20px;
     font-size: 16px;
     font-weight: 800;
     cursor: pointer;
+    text-decoration: none;
+    display: inline-block;
   }
-  button.secondary {
+  button.secondary, a.button.secondary {
     background: #132319;
     border: 1px solid #2d5140;
     color: var(--soft);
@@ -189,10 +191,11 @@
     <div class="card">
       <h2>3. TamaPoke sprites</h2>
       <p>
-        Copy the optional TamaPoke sprite pack to the microSD card over USB.
-        Leave the device plugged in and keep this tab open until it finishes.
+        After WiFi is configured, install the optional TamaPoke sprite pack over local WiFi.
+        The browser downloads the pack, then sends the sprite files to the device.
       </p>
       <div class="actions">
+        <a class="button secondary" href="http://capsuleradar.local/sprites" target="_blank" rel="noopener">Open WiFi sprite installer</a>
         <button id="spriteConnect" class="secondary">Connect for sprites</button>
         <button id="spriteList" class="secondary" disabled>List SD sprites</button>
         <button id="spriteLoad" disabled>Load sprites</button>
@@ -200,8 +203,7 @@
       <div id="spriteBar" class="bar"><div></div><span>0%</span></div>
       <pre id="spriteLog"></pre>
       <p class="note">
-        This uses Web Serial and the firmware's <code>PUT</code> loader. If you just installed firmware,
-        wait for the board to reboot before connecting here.
+        The USB serial buttons are a fallback only. Prefer the WiFi installer once the board is on your network.
       </p>
     </div>
 

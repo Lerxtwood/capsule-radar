@@ -29,6 +29,8 @@
 #include <WebServer.h>              // configuration web page
 #include <HTTPClient.h>             // remote release manifest + firmware download
 #include <WiFiClientSecure.h>       // HTTPS for remote firmware download
+#include <FS.h>                     // SD sprite installer
+#include <SD_MMC.h>                 // SD sprite installer
 #include <ESPmDNS.h>                // http://capsuleradar.local
 #include <ArduinoOTA.h>             // OTA firmware update over WiFi (PlatformIO/espota)
 #include <Update.h>                 // browser OTA: self-flash an uploaded .bin
@@ -112,6 +114,13 @@ static const int TZOPTS_N = sizeof(TZOPTS) / sizeof(TZOPTS[0]);
 
 static const char *RELEASE_MANIFEST_URL = "https://github.com/Lerxtwood/capsule-radar/releases/latest/download/manifest.json";
 static const uint32_t MIN_FIRMWARE_SIZE_BYTES = 512UL * 1024UL;
+
+// TamaPoke sprite installer state. The browser downloads sprites.pak from
+// GitHub Pages, parses it, and POSTs individual files to this firmware over
+// local WiFi. That avoids both the slow USB serial loader and ESP32-side
+// GitHub TLS pressure.
+static File              g_spriteUploadFile;
+static bool              g_spriteUploadOk = false;
 
 // ---- networking task (core 0): fetch + parse, never touches the display ----
 static void adsb_task(void*) {
@@ -543,7 +552,7 @@ static void handleRoot() {
         "#map{height:220px;border-radius:10px;margin:6px 0 8px;border:1px solid #2a4a39;z-index:0}"
         "</style></head><body>"
         "<div class=hd><div class=dot></div><div><h1>Capsule Radar</h1><p class=sub>Live ADS-B radar &middot; configuration</p></div></div>"
-        "<nav class=nav><a class=on href=/>Capsule-Radar</a><a href=/tamapoke>TamaPoke</a><a href=/update>Firmware</a></nav>"
+        "<nav class=nav><a class=on href=/>Capsule-Radar</a><a href=/tamapoke>TamaPoke</a><a href=/sprites>Sprites</a><a href=/update>Firmware</a></nav>"
         "<div class=card><div class=t>Location &amp; range</div><form method=POST action=/save>"
         "<label>Center point &mdash; tap the map or drag the pin</label>"
         "<div id=map></div>"
@@ -983,7 +992,7 @@ static void handleTamapokePage() {
         ".ft{color:#8b7898;font-size:12px;text-align:center;margin-top:6px}.ft code{color:#e8b8ff}"
         "</style></head><body>"
         "<div class=hd><div class=dot></div><div><h1>TamaPoke</h1><p class=sub>Pet app settings</p></div></div>"
-        "<nav class=nav><a href=/>Capsule-Radar</a><a class=on href=/tamapoke>TamaPoke</a><a href=/update>Firmware</a></nav>"
+        "<nav class=nav><a href=/>Capsule-Radar</a><a class=on href=/tamapoke>TamaPoke</a><a href=/sprites>Sprites</a><a href=/update>Firmware</a></nav>"
         "<div class=card><div class=t>Display</div>"
         "<label>TamaPoke screen rotation</label><select onchange='tr(this.value)'>%s</select>"
         "<label><input type=checkbox class=ck %s onchange='du(this.checked)'>Dim while plugged in</label>"
@@ -1104,6 +1113,86 @@ static String jsonValueForKey(const String &json, const String &key) {
     String value = json.substring(valueStart, valueEnd);
     value.trim();
     return value;
+}
+
+static bool spritePathSafe(const char *name) {
+    if (!name || !name[0] || strlen(name) > 80) return false;
+    if (strstr(name, "..") || strchr(name, '\\') || name[0] == '/') return false;
+    return strncmp(name, "mons/", 5) == 0;
+}
+
+static void handleSpritesPage() {
+    String page =
+        "<!DOCTYPE html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<title>TamaPoke Sprites</title><style>"
+        "body{background:#06120b;color:#dfffee;font-family:system-ui,-apple-system,sans-serif;margin:0 auto;padding:22px;max-width:480px}"
+        "h1{color:#ff62df;font-size:22px}.card{border:1px solid #244b35;border-radius:14px;padding:16px;background:#0b1b12}"
+        "button{width:100%;padding:12px;border:0;border-radius:9px;background:#1dff86;color:#04140b;font-weight:800;font-size:16px}"
+        "button:disabled{opacity:.45}.bar{height:18px;border:1px solid #2c6847;border-radius:999px;overflow:hidden;margin:14px 0;position:relative}"
+        ".bar div{height:100%;width:0;background:#1dff86}.bar span{position:absolute;inset:0;text-align:center;font-size:12px;font-weight:800;color:#eafff3}"
+        "pre{white-space:pre-wrap;color:#9affc8;background:#041008;border:1px solid #244b35;border-radius:10px;padding:10px;min-height:72px}"
+        "a{color:#9affc8}.nav{display:flex;gap:8px;margin:0 0 14px}.nav a{flex:1;text-align:center;text-decoration:none;padding:9px;border:1px solid #244b35;border-radius:9px}"
+        "input{width:100%;margin-top:10px;color:#9affc8}"
+        "</style></head><body><nav class=nav><a href=/>Radar</a><a href=/tamapoke>TamaPoke</a><a href=/sprites>Sprites</a><a href=/update>Firmware</a></nav>"
+        "<h1>TamaPoke Sprites</h1><div class=card><p>Install <code>sprites.pak</code> to the microSD card over local WiFi. "
+        "The browser downloads the pack, then sends each sprite file to the device.</p>"
+        "<button id=b onclick=start()>Install sprites over WiFi</button><input id=file type=file accept='.pak' style='display:none'>"
+        "<div class=bar><div id=f></div><span id=p>0%</span></div><pre id=s>Ready.</pre></div>"
+        "<script>"
+        "const SRC='https://lerxtwood.github.io/capsule-radar/sprites.pak';"
+        "const dec=new TextDecoder();let sent=0,total=0;"
+        "function fmt(b){return b>1048576?(b/1048576).toFixed(1)+' MB':b>1024?Math.round(b/1024)+' KB':b+' B'}"
+        "function prog(){let pct=total?Math.min(100,sent/total*100):0;f.style.width=pct.toFixed(1)+'%';p.textContent=pct.toFixed(1)+'% ('+fmt(sent)+' / '+fmt(total)+')'}"
+        "function parse(buf){let dv=new DataView(buf);if(dec.decode(new Uint8Array(buf,0,4))!=='TPAK')throw Error('invalid sprite pack');"
+        "let n=dv.getUint16(4,true),off=6,items=[];for(let i=0;i<n;i++){let l=dv.getUint8(off++),name=dec.decode(new Uint8Array(buf,off,l));off+=l;let size=dv.getUint32(off,true);off+=4;items.push({name,size})}"
+        "let pos=off;for(let it of items){it.data=new Uint8Array(buf,pos,it.size);pos+=it.size}return items}"
+        "async function loadPack(){try{s.textContent='Downloading sprites.pak...';let r=await fetch(SRC,{cache:'no-store'});if(!r.ok)throw Error('HTTP '+r.status);return await r.arrayBuffer()}catch(e){"
+        "s.textContent='Could not download sprites.pak automatically: '+e.message+'\\nChoose a local sprites.pak file instead.';file.style.display='block';"
+        "return await new Promise((res,rej)=>{file.onchange=()=>{let x=file.files[0];if(!x)rej(Error('no file selected'));else x.arrayBuffer().then(res,rej)}})}}"
+        "async function send(it,i,n){let fd=new FormData();fd.append('file',new Blob([it.data]),it.name);s.textContent='Sending '+(i+1)+'/'+n+': '+it.name+' ('+fmt(it.size)+')';"
+        "let r=await fetch('/sprites/upload',{method:'POST',body:fd});if(!r.ok)throw Error(await r.text());sent+=it.size;prog()}"
+        "async function start(){b.disabled=true;try{sent=0;total=0;prog();let items=parse(await loadPack());total=items.reduce((a,x)=>a+x.size,0);prog();"
+        "for(let i=0;i<items.length;i++)await send(items[i],i,items.length);s.textContent='Done. Installed '+items.length+' sprite files.'}catch(e){s.textContent='Install failed: '+e.message;b.disabled=false}}"
+        "prog();</script></body></html>";
+    g_web.send(200, "text/html", page);
+}
+
+static void handleSpriteUpload() {
+    HTTPUpload &up = g_web.upload();
+    if (up.status == UPLOAD_FILE_START) {
+        g_firmwareUpdateInProgress = true;
+        g_spriteUploadOk = false;
+        if (!g_spriteLoaderSdStarted) {
+            g_spriteLoaderSdStarted = sdBegin();
+            Serial.printf("[sprite] SD upload installer %s\n", g_spriteLoaderSdStarted ? "ready" : "failed");
+        }
+        if (!g_spriteLoaderSdStarted || !sdReady || !spritePathSafe(up.filename.c_str())) {
+            Serial.printf("[sprite] upload rejected: %s\n", up.filename.c_str());
+            return;
+        }
+        SD_MMC.mkdir("/mons");
+        String path = "/" + up.filename;
+        g_spriteUploadFile = SD_MMC.open(path, FILE_WRITE);
+        if (!g_spriteUploadFile) {
+            Serial.printf("[sprite] upload open failed: %s\n", path.c_str());
+            return;
+        }
+        g_spriteUploadOk = true;
+    } else if (up.status == UPLOAD_FILE_WRITE) {
+        if (g_spriteUploadOk && g_spriteUploadFile) {
+            if (g_spriteUploadFile.write(up.buf, up.currentSize) != up.currentSize) {
+                g_spriteUploadOk = false;
+            }
+        }
+    } else if (up.status == UPLOAD_FILE_END) {
+        if (g_spriteUploadFile) g_spriteUploadFile.close();
+        if (g_spriteUploadOk) sdDirty = true;
+        g_firmwareUpdateInProgress = false;
+    } else if (up.status == UPLOAD_FILE_ABORTED) {
+        if (g_spriteUploadFile) g_spriteUploadFile.close();
+        g_spriteUploadOk = false;
+        g_firmwareUpdateInProgress = false;
+    }
 }
 
 static bool fetchRemoteUpdateManifest(String &manifest, String &error) {
@@ -1407,7 +1496,7 @@ static void handleUpdatePage() {
         ".t{color:#1dff86;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:10px;opacity:.85}"
         "a{color:#1dff86}p{color:#9affc8;font-size:13px}"
         "</style></head><body><h1>Firmware update (OTA)</h1>"
-        "<nav class=nav><a href=/>Capsule-Radar</a><a href=/tamapoke>TamaPoke</a><a class=on href=/update>Firmware</a></nav>"
+        "<nav class=nav><a href=/>Capsule-Radar</a><a href=/tamapoke>TamaPoke</a><a href=/sprites>Sprites</a><a class=on href=/update>Firmware</a></nav>"
         "<div class=card><div class=t>GitHub release</div>"
         "<p>Current firmware: <b>v" FW_VERSION "</b></p>"
         "<p>Check the latest GitHub Release and install the verified <code>CapsuleRadar-ota.bin</code> directly from the device.</p>"
@@ -1633,6 +1722,13 @@ void setup() {
     g_web.on("/tamapoke", HTTP_GET, handleTamapokePage);
     g_web.on("/tamapoke/rotate", handleTamapokeRotate);
     g_web.on("/tamapoke/dim-usb", handleTamapokeDimUsb);
+    g_web.on("/sprites", HTTP_GET, handleSpritesPage);
+    g_web.on("/sprites/upload", HTTP_POST,
+        []() {
+            g_web.send(g_spriteUploadOk ? 200 : 500, "text/plain", g_spriteUploadOk ? "OK" : "sprite upload failed");
+            g_firmwareUpdateInProgress = false;
+        },
+        handleSpriteUpload);
     g_web.on("/update", HTTP_GET, handleUpdatePage);
     g_web.on("/enter-update-mode", HTTP_POST, handleEnterUpdateMode);
     g_web.on("/exit-update-mode", HTTP_POST, handleExitUpdateMode);
