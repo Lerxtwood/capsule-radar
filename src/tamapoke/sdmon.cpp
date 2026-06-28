@@ -227,7 +227,7 @@ bool sdSerialCommand(const String &line) {
       return true;
     }
     Serial.println("OK");
-    static uint8_t buf[4096];
+    static uint8_t buf[2048];
     uint32_t remaining = size;
     Serial.setTimeout(5000);
     while (remaining > 0) {
