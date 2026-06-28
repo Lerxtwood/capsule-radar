@@ -221,6 +221,8 @@
   const barText = bar.querySelector('span');
   const enc = new TextEncoder();
   const dec = new TextDecoder();
+  const SPRITE_BAUD_RATE = 921600;
+  const SPRITE_SERIAL_BUFFER_SIZE = 65536;
   const SPRITE_CHUNK_SIZE = 2048;
   let port, reader, writer, lineBuf = '';
 
@@ -392,14 +394,14 @@
     }
     try {
       port = await navigator.serial.requestPort();
-      await port.open({ baudRate: 115200 });
+      await port.open({ baudRate: SPRITE_BAUD_RATE, bufferSize: SPRITE_SERIAL_BUFFER_SIZE });
       reader = port.readable.getReader();
       writer = port.writable.getWriter();
       lineBuf = '';
       connectBtn.disabled = true;
       listBtn.disabled = true;
       loadBtn.disabled = true;
-      log('Connected. Probing sprite loader...');
+      log(`Connected at ${SPRITE_BAUD_RATE} baud. Probing sprite loader...`);
       if (!await waitForSpriteLoader()) throw new Error('sprite loader did not become ready');
       listBtn.disabled = false;
       loadBtn.disabled = false;
