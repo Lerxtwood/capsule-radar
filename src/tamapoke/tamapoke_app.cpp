@@ -586,17 +586,6 @@ void handleTouch() {
     tYl = y;
     tPhysXl = physX;
     tPhysYl = physY;
-    // Combined-firmware escape hatch: hold the top-center of the TamaPoke view to return to
-    // Capsule Radar, even when TamaPoke is the saved boot app and the radar
-    // config hint is not visible on-screen.
-    if (!holdFired && !swallowGesture && millis() - tStart > 1800 &&
-        abs(tXl - tX0) < 35 && abs(tYl - tY0) < 35 &&
-        tX0 > 173 && tX0 < 293 && tY0 < 90) {
-      Serial.println("[tamapoke] return-to-radar gesture");
-      gRequestRadarApp = true;
-      holdFired = true;
-      return;
-    }
     // pulsacion larga sin moverse sobre el bicho -> dialogo de soltar
     if (!holdFired && !swallowGesture && !galleryOpen && !cardOpen && !kbOpen && !clockOpen && millis() - tStart > 3000 &&
         abs(tXl - tX0) < 30 && abs(tYl - tY0) < 30 && inPetZone(tX0, tY0) &&
@@ -609,7 +598,12 @@ void handleTouch() {
     int dx = tXl - tX0, dy = tYl - tY0;
     uint32_t dt = millis() - tStart;
     if (!holdFired && !swallowGesture) {
-      if (abs(dx) > 80 && abs(dy) < 70 && dt < 800) onSwipe(dx > 0 ? 1 : -1);
+      // Combined-firmware escape hatch: tap the top-center of the TamaPoke view to return to
+      // Capsule Radar, even when TamaPoke is the saved boot app and the radar config hint is not visible.
+      if (dt < 800 && abs(dx) < 40 && abs(dy) < 40 && tX0 > 188 && tX0 < 278 && tY0 < 42) {
+        Serial.println("[tamapoke] return-to-radar tap");
+        gRequestRadarApp = true;
+      } else if (abs(dx) > 80 && abs(dy) < 70 && dt < 800) onSwipe(dx > 0 ? 1 : -1);
       else if (abs(dy) > 80 && abs(dx) < 70 && dt < 800) onSwipeV(dy > 0 ? 1 : -1);
       else if (dt < 1500 && abs(dx) < 40 && abs(dy) < 40) onTap(tX0, tY0);
     }

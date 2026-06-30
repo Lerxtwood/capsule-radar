@@ -997,7 +997,7 @@ static void handleTamapokePage() {
         "<label>TamaPoke screen rotation</label><select onchange='tr(this.value)'>%s</select>"
         "<label><input type=checkbox class=ck %s onchange='du(this.checked)'>Dim while plugged in</label>"
         "<p class=note>When off, TamaPoke stays bright while USB power is connected. It still dims on battery to protect the display and save power.</p>"
-        "<p class=note>Escape hatch: hold the top-center of the TamaPoke screen for about 2 seconds to return to Capsule Radar.</p>"
+        "<p class=note>Escape hatch: tap the top-center of the TamaPoke screen to return to Capsule Radar.</p>"
         "</div><p class=ft>Reach me at <code>capsuleradar.local</code> &middot; v" FW_VERSION "</p>"
         "<script>function tr(v){fetch('/tamapoke/rotate?v='+v+'&save=1')}function du(c){fetch('/tamapoke/dim-usb?v='+(c?1:0)+'&save=1')}</script></body></html>",
         ropts.c_str(), g_tamapokeDimOnUsb ? "checked" : "");
@@ -1641,7 +1641,7 @@ void setup() {
     }
     radar::setThemeChangedCb(saveTheme);
     ui_set_range_cb(onRangeChange);              // on-screen zoom button
-    ui_set_app_switch_cb(requestTamapokeFromRadar); // top-center hold switches to TamaPoke
+    ui_set_app_switch_cb(requestTamapokeFromRadar); // top-center tap switches to TamaPoke
     ui_set_units(g_units);                       // apply saved unit preset
     ui_set_range_km(g_settings.rangeKm);         // show the loaded range
 

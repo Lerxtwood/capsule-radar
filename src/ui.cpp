@@ -178,9 +178,7 @@ static void refresh_card(void) {
 
 // --------------------------------------------------------------------- input
 static bool s_longPressed = false;
-static bool s_topHold = false;
-static bool s_topHoldFired = false;
-static uint32_t s_topHoldStart = 0;
+static bool s_topTap = false;
 static int s_rangeIdx = -1;
 static float s_rangeKm = RANGE_KM_DEFAULT;   // current display range (km), for the stats view
 static void (*s_rangeCb)(float) = nullptr;
@@ -189,6 +187,10 @@ static lv_obj_t *s_zoomBtn = nullptr, *s_zoomLbl = nullptr;
 
 void ui_set_range_cb(void (*cb)(float)) { s_rangeCb = cb; }
 void ui_set_app_switch_cb(void (*cb)(void)) { s_appSwitchCb = cb; }
+
+static bool radar_top_center_point(lv_point_t p) {
+    return p.x > 188 && p.x < 278 && p.y < 42;
+}
 
 static void zoom_cb(lv_event_t *e) {   // fires on PRESS (robust vs scroll-cancel on the tileview)
     (void)e;
@@ -218,51 +220,42 @@ void ui_set_range_km(float km) {
 static void radar_press_cb(lv_event_t *e) {
     (void)e;
     s_longPressed = false;
-    s_topHold = false;
-    s_topHoldFired = false;
+    s_topTap = false;
     lv_indev_t *indev = lv_indev_get_act();
     if (!indev) return;
     lv_point_t p;
     lv_indev_get_point(indev, &p);
-    if (p.x > 173 && p.x < 293 && p.y < 90) {
-        s_topHold = true;
-        s_topHoldStart = lv_tick_get();
-    }
-}
-
-static void radar_pressing_cb(lv_event_t *e) {
-    (void)e;
-    if (!s_topHold || s_topHoldFired) return;
-    lv_indev_t *indev = lv_indev_get_act();
-    if (!indev) return;
-    lv_point_t p;
-    lv_indev_get_point(indev, &p);
-    if (!(p.x > 173 && p.x < 293 && p.y < 90)) {
-        s_topHold = false;
-        return;
-    }
-    if (lv_tick_get() - s_topHoldStart > 1800) {
-        s_topHoldFired = true;
-        s_longPressed = true;
-        if (s_appSwitchCb) s_appSwitchCb();
+    if (radar_top_center_point(p)) {
+        s_topTap = true;
     }
 }
 
 static void radar_longpress_cb(lv_event_t *e) {   // long-press cycles the visual theme
     (void)e;
-    if (s_topHold) return;                         // reserved for app switch after a longer hold
+    lv_indev_t *indev = lv_indev_get_act();
+    if (indev) {
+        lv_point_t p;
+        lv_indev_get_point(indev, &p);
+        if (radar_top_center_point(p)) return;    // reserved for app switch tap
+    }
     radar::cycleTheme();
     s_longPressed = true;
 }
 
 static void radar_clicked_cb(lv_event_t *e) {
     (void)e;
-    if (s_longPressed) { s_longPressed = false; s_topHold = false; return; }   // ignore the click after a long-press
+    if (s_longPressed) { s_longPressed = false; s_topTap = false; return; }   // ignore the click after a long-press
     s_autoPreview = false;                                  // manual selection owns the card now
     lv_indev_t *indev = lv_indev_get_act();
     if (!indev) return;
     lv_point_t p;
     lv_indev_get_point(indev, &p);
+    if (s_topTap && radar_top_center_point(p)) {
+        s_topTap = false;
+        if (s_appSwitchCb) s_appSwitchCb();
+        return;
+    }
+    s_topTap = false;
     radar::select(radar::hitTest(p.x, p.y));   // hit -> select; miss -> clear
     refresh_card();
 }
@@ -605,7 +598,6 @@ void ui_create(void) {
     lv_obj_add_flag(s_tileRadar, LV_OBJ_FLAG_CLICKABLE);     // receive taps (planes/empty)
     lv_obj_add_event_cb(s_tileRadar, radar_clicked_cb, LV_EVENT_CLICKED, NULL);
     lv_obj_add_event_cb(s_tileRadar, radar_press_cb, LV_EVENT_PRESSED, NULL);
-    lv_obj_add_event_cb(s_tileRadar, radar_pressing_cb, LV_EVENT_PRESSING, NULL);
     lv_obj_add_event_cb(s_tileRadar, radar_longpress_cb, LV_EVENT_LONG_PRESSED, NULL);
     build_card();
 
