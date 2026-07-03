@@ -1,9 +1,9 @@
 ﻿name: Release firmware
 
-# Push a tag like v1.0.0 to build the merged firmware and attach it to a GitHub
-# Release. The browser web installer mirrors CapsuleRadar-esp32s3.bin from the
-# latest release into GitHub Pages, the sprite installer mirrors sprites.pak,
-# and the device OTA updater consumes CapsuleRadar-ota.bin plus manifest.json:
+# Push a tag like v1.0.0 to build the companion firmware images and attach them
+# to a GitHub Release. The browser web installer mirrors the bootloader,
+# partition table, OTA data, both app-slot images, and sprites.pak from the
+# latest release into GitHub Pages:
 #   git tag v1.0.0 && git push origin v1.0.0
 
 on:
@@ -20,6 +20,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Checkout PrintSphere companion firmware
+        uses: actions/checkout@v4
+        with:
+          repository: Lerxtwood/PrintSphere
+          path: PrintSphere
+
       - uses: actions/setup-python@v5
         with:
           python-version: '3.11'
@@ -30,50 +36,48 @@ jobs:
       - name: Build firmware
         run: pio run -e esp32-s3-amoled-175
 
-      - name: Merge into a single flashable binary
+      - name: Build PrintSphere companion firmware
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.4
+          target: esp32s3
+          path: PrintSphere
+          command: idf.py -D PRINTSPHERE_HW_VARIANT=amoled_1_75 build
+
+      - name: Collect release assets
         run: |
           B=.pio/build/esp32-s3-amoled-175
-          BOOT_APP0="$(find "$HOME/.platformio/packages" -name boot_app0.bin -path '*framework-arduinoespressif32*' | head -1)"
-          python -m esptool --chip esp32s3 merge_bin -o CapsuleRadar-esp32s3.bin \
-            --flash_mode dio --flash_freq 80m --flash_size 16MB \
-            0x0     "$B/bootloader.bin" \
-            0x8000  "$B/partitions.bin" \
-            0xe000  "$BOOT_APP0" \
-            0x10000 "$B/firmware.bin"
-          cp "$B/firmware.bin" CapsuleRadar-ota.bin   # app-only image for the device's web OTA page
+          P=PrintSphere/build
+          cp "$P/bootloader/bootloader.bin" bootloader.bin
+          cp "$P/partition_table/partition-table.bin" partition-table.bin
+          cp "$P/ota_data_initial.bin" ota_data_initial.bin
+          cp "$B/firmware.bin" CapsuleRadar-ota.bin
+          cp "$P/printsphere_idf.bin" PrintSphere-ota.bin
           curl -L --fail -o sprites.pak "https://socquique.github.io/TamaPoke/web/sprites.pak"
-          OTA_SHA="$(sha256sum CapsuleRadar-ota.bin | awk '{print $1}')"
-          OTA_SIZE="$(stat -c%s CapsuleRadar-ota.bin)"
-          TAG="${GITHUB_REF_NAME}"
-          cat > manifest.json <<EOF
-          {
-            "version": "${TAG#v}",
-            "board": "esp32-s3-amoled-175",
-            "firmware": "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/CapsuleRadar-ota.bin",
-            "sha256": "${OTA_SHA}",
-            "size": ${OTA_SIZE},
-            "commit": "${GITHUB_SHA::7}",
-            "builtAtUtc": "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          }
-          EOF
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            CapsuleRadar-esp32s3.bin
+            bootloader.bin
+            partition-table.bin
+            ota_data_initial.bin
             CapsuleRadar-ota.bin
-            manifest.json
+            PrintSphere-ota.bin
             sprites.pak
           generate_release_notes: true
           body: |
-            **First flash (USB):** `CapsuleRadar-esp32s3.bin` — the full merged image (offset `0x0`).
-            - Browser, no toolchain: https://lerxtwood.github.io/capsule-radar/
-            - Or: `esptool.py --chip esp32s3 write_flash 0x0 CapsuleRadar-esp32s3.bin`
+            **First flash (USB/browser):** use the web installer. It installs the companion layout and both app slots:
+            - `bootloader.bin` at `0x0`
+            - `partition-table.bin` at `0x8000`
+            - `ota_data_initial.bin` at `0x109000`
+            - `CapsuleRadar-ota.bin` at `0x110000`
+            - `PrintSphere-ota.bin` at `0x610000`
 
-            **Update over WiFi (no cable):** `CapsuleRadar-ota.bin` — the app-only image.
-            Open `http://capsuleradar.local/update` on the device and upload this file.
-            (Do **not** upload the merged image there.)
+            - Browser, no toolchain: https://lerxtwood.github.io/capsule-radar/
+            - Or: `esptool.py --chip esp32s3 write_flash 0x0 bootloader.bin 0x8000 partition-table.bin 0x109000 ota_data_initial.bin 0x110000 CapsuleRadar-ota.bin 0x610000 PrintSphere-ota.bin`
+
+            **Per-app WiFi updates:** next step. Until the fixed-slot updaters are finished, use the browser installer or the fixed-offset `esptool.py` command above for multi-firmware installs.
 
             **TamaPoke sprites:** `sprites.pak` — optional SD-card sprite bundle used by the browser installer.
 

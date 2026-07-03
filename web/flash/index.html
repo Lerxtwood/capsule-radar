@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Capsule Radar + TamaPoke - Web Installer</title>
+<title>Capsule Companion - Web Installer</title>
 <script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
 <style>
   :root {
@@ -156,18 +156,19 @@
 <body>
   <div class="wrap">
     <div class="radar"></div>
-    <h1>Capsule Radar + TamaPoke</h1>
+    <h1>Capsule Companion</h1>
     <div class="sub">
       Combined firmware for the Waveshare ESP32-S3 Touch AMOLED 1.75:
-      live ADS-B radar plus the TamaPoke pet app, switchable on-device.
+      live ADS-B radar, TamaPoke, and PrintSphere installed into their own slots
+      and switchable on-device.
     </div>
 
     <div class="card">
       <h2>1. Install firmware</h2>
-      <div class="pill">Uses the latest GitHub Release full-flash image</div>
+      <div class="pill">Uses the latest GitHub Release multi-slot images</div>
       <p style="margin-top:0">Flash from Chrome or Edge - no PlatformIO or Arduino install needed.</p>
       <esp-web-install-button manifest="manifest.json">
-        <button slot="activate">Install combined firmware</button>
+        <button slot="activate">Install all firmware</button>
         <span slot="unsupported">Use Chrome or Edge on desktop. Web Serial is required.</span>
         <span slot="not-allowed">This page must be served over HTTPS or localhost.</span>
       </esp-web-install-button>
@@ -181,10 +182,11 @@
       <h2>2. Configure WiFi</h2>
       <ol>
         <li>Plug the board in with a USB-C data cable.</li>
-        <li>Click <b>Install combined firmware</b> and choose the <code>USB JTAG/serial</code> port.</li>
+        <li>Click <b>Install all firmware</b> and choose the <code>USB JTAG/serial</code> port.</li>
         <li>After reboot, join the <b>CapsuleRadar-Setup</b> WiFi network from your phone or computer.</li>
         <li>Enter your WiFi and radar home location.</li>
-        <li>Fine-tune settings later at <code>http://capsuleradar.local/</code>.</li>
+        <li>Fine-tune settings later at <code>http://capsuleradar.local/</code>. Use the on-screen
+          <b>Tama</b>, <b>Print</b>, and <b>Radar</b> buttons to move between apps.</li>
       </ol>
     </div>
 
@@ -208,7 +210,8 @@
     </div>
 
     <div class="note">
-      Release assets: <a href="https://github.com/Lerxtwood/capsule-radar/releases/latest">latest GitHub Release</a><br>
+      Release assets: <a href="https://github.com/Lerxtwood/capsule-radar/releases/latest">latest GitHub Release</a>
+      (bootloader, partition table, both app images, and sprite pack)<br>
       Source: <a href="https://github.com/Lerxtwood/capsule-radar">github.com/Lerxtwood/capsule-radar</a>
     </div>
   </div>

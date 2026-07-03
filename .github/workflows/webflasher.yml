@@ -2,8 +2,12 @@ name: Deploy web installer
 
 # Publishes web/flash/ to GitHub Pages.
 #
-# The installer publishes a copy of the latest GitHub Release full-flash binary:
-#   CapsuleRadar-esp32s3.bin
+# The installer publishes copies of the latest GitHub Release install parts:
+#   bootloader.bin
+#   partition-table.bin
+#   ota_data_initial.bin
+#   CapsuleRadar-ota.bin
+#   PrintSphere-ota.bin
 # and the TamaPoke sprite bundle:
 #   sprites.pak
 #
@@ -43,8 +47,20 @@ jobs:
           mkdir -p site
           cp -R web/flash/. site/
           curl -L --fail \
-            -o site/CapsuleRadar-esp32s3.bin \
-            "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/CapsuleRadar-esp32s3.bin"
+            -o site/bootloader.bin \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/bootloader.bin"
+          curl -L --fail \
+            -o site/partition-table.bin \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/partition-table.bin"
+          curl -L --fail \
+            -o site/ota_data_initial.bin \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/ota_data_initial.bin"
+          curl -L --fail \
+            -o site/CapsuleRadar-ota.bin \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/CapsuleRadar-ota.bin"
+          curl -L --fail \
+            -o site/PrintSphere-ota.bin \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/PrintSphere-ota.bin"
           curl -L --fail \
             -o site/sprites.pak \
             "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/sprites.pak"

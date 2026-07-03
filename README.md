@@ -58,10 +58,10 @@ Makers can flash without installing anything using **ESP Web Tools** (Chrome or 
 1. Open the **[web installer](https://lerxtwood.github.io/capsule-radar/)** (the project's GitHub Pages site).
 2. Plug the board in with a USB-C **data** cable and click **Install**.
 
-The installer page is published by GitHub Actions ([`.github/workflows/webflasher.yml`](.github/workflows/webflasher.yml)) and uses the latest GitHub Release `CapsuleRadar-esp32s3.bin` full-flash image. Enable Pages once in **Settings -> Pages -> Source = GitHub Actions**. Tagged releases (`git tag v1.0.0 && git push origin v1.0.0`) attach both the full-flash image and the OTA image via [`release.yml`](.github/workflows/release.yml). To preview the flasher locally:
+The installer page is published by GitHub Actions ([`.github/workflows/webflasher.yml`](.github/workflows/webflasher.yml)) and uses the latest GitHub Release bootloader, companion partition table, OTA data, `CapsuleRadar-ota.bin`, `PrintSphere-ota.bin`, and `sprites.pak` assets. Enable Pages once in **Settings -> Pages -> Source = GitHub Actions**. Tagged releases (`git tag v1.0.0 && git push origin v1.0.0`) build and attach the browser-installable images via [`release.yml`](.github/workflows/release.yml). To preview the flasher locally:
 
 ```bash
-./scripts/build_webflasher.sh                      # build + merge into web/flash/
+./scripts/build_webflasher.sh                      # mirror latest release assets into web/flash/
 python3 -m http.server -d web/flash 8000           # serve (Web Serial works on localhost)
 # open http://localhost:8000
 ```
@@ -96,7 +96,7 @@ src/
   sim_main.cpp       native SDL simulator (not flashed)
 include/lv_conf.h    LVGL config (v8)
 web/flash/           browser web installer (ESP Web Tools) for makers
-scripts/             build_webflasher.sh (optional local merged .bin helper)
+scripts/             build_webflasher.sh (optional local installer asset helper)
 docs/                hardware / data-source / architecture notes
 ```
 

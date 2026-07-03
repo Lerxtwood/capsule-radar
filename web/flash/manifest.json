@@ -1,12 +1,16 @@
 {
-  "name": "Capsule Radar + TamaPoke",
+  "name": "Capsule Companion",
   "version": "latest",
   "new_install_prompt_erase": true,
   "builds": [
     {
       "chipFamily": "ESP32-S3",
       "parts": [
-        { "path": "CapsuleRadar-esp32s3.bin", "offset": 0 }
+        { "path": "bootloader.bin", "offset": 0 },
+        { "path": "partition-table.bin", "offset": 32768 },
+        { "path": "ota_data_initial.bin", "offset": 1085440 },
+        { "path": "CapsuleRadar-ota.bin", "offset": 1114112 },
+        { "path": "PrintSphere-ota.bin", "offset": 6356992 }
       ]
     }
   ]
