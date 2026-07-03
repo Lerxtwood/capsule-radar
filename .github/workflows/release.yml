@@ -111,9 +111,7 @@ jobs:
             - Browser, no toolchain: https://lerxtwood.github.io/capsule-radar/
             - Or: `esptool.py --chip esp32s3 write_flash 0x0 bootloader.bin 0x8000 partition-table.bin 0x109000 ota_data_initial.bin 0x110000 CapsuleRadar-ota.bin 0x610000 PrintSphere-ota.bin`
 
-            **Per-app WiFi updates:** each firmware updater uses its own fixed-slot manifest:
-            - Capsule Radar/TamaPoke: `capsule-radar-manifest.json` -> `ota_0`
-            - PrintSphere: `printsphere-manifest.json` -> `ota_1`
+            **Firmware updates:** use the browser web installer above. The firmware pages can check the latest release, but installs are handled by the web installer so all slots stay consistent.
 
             **TamaPoke sprites:** `sprites.pak` — optional SD-card sprite bundle used by the browser installer.
 

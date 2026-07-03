@@ -1523,33 +1523,7 @@ static void handleRemoteUpdateCheck() {
 }
 
 static void handleRemoteUpdateInstall() {
-    String manifest, error, version, firmwareUrl, sha256;
-    uint32_t size = 0;
-    if (!fetchRemoteUpdateManifest(RELEASE_MANIFEST_URL, manifest, error) ||
-        !parseRemoteUpdateManifest(manifest, version, firmwareUrl, sha256, size, error)) {
-        g_firmwareUpdateInProgress = false;
-        g_web.send(500, "text/plain", error);
-        return;
-    }
-    if (!isRemoteVersionNewer(version)) {
-        g_web.send(409, "text/plain", "No newer firmware is available.");
-        return;
-    }
-    Serial.printf("[update] installing remote firmware %s (%u bytes)\n", version.c_str(), (unsigned)size);
-    if (!installRemoteFirmware(firmwareUrl, sha256, size, false, true, error)) {
-        g_web.send(500, "text/plain", error);
-        return;
-    }
-    g_web.sendHeader("Connection", "close");
-    g_web.sendHeader("Refresh", "8; url=/");
-    g_web.send(200, "text/html",
-        "<!DOCTYPE html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
-        "<body style='background:#06100a;color:#1dff86;font-family:system-ui,sans-serif;padding:24px'>"
-        "<h1>Firmware updated</h1><p>Downloaded and verified version " + version +
-        ". Restarting now...</p><script>setTimeout(function(){location.href='/'},8000)</script></body></html>");
-    delay(900);
-    saveFirmwareUpdateMode(false);
-    ESP.restart();
+    g_web.send(410, "text/plain", "OTA install has been removed. Use the web installer instead: https://lerxtwood.github.io/capsule-radar/");
 }
 
 static void handlePrintSphereUpdateCheck() {
@@ -1568,96 +1542,46 @@ static void handlePrintSphereUpdateCheck() {
 }
 
 static void handlePrintSphereUpdateInstall() {
-    String manifest, error, version, firmwareUrl, sha256;
-    uint32_t size = 0;
-    if (!fetchRemoteUpdateManifest(PRINTSPHERE_MANIFEST_URL, manifest, error) ||
-        !parseRemoteUpdateManifest(manifest, version, firmwareUrl, sha256, size, error)) {
-        g_firmwareUpdateInProgress = false;
-        g_web.send(500, "text/plain", error);
-        return;
-    }
-    Serial.printf("[update] installing PrintSphere companion firmware %s (%u bytes)\n",
-                  version.c_str(), (unsigned)size);
-    if (!installRemoteFirmware(firmwareUrl, sha256, size, true, false, error)) {
-        g_web.send(500, "text/plain", error);
-        return;
-    }
-    g_web.send(200, "text/html",
-        "<!DOCTYPE html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
-        "<body style='background:#06100a;color:#1dff86;font-family:system-ui,sans-serif;padding:24px'>"
-        "<h1>PrintSphere updated</h1><p>Downloaded and verified version " + version +
-        " into ota_1. You can switch to PrintSphere when ready.</p><p><a style='color:#1dff86' href='/update'>Back to Firmware</a></p></body></html>");
+    g_web.send(410, "text/plain", "OTA install has been removed. Use the web installer instead: https://lerxtwood.github.io/capsule-radar/");
 }
 
 static void handleUpdatePage() {
     String page = F(
         "<!DOCTYPE html><html><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
-        "<title>Capsule Radar - Update</title><style>"
+        "<title>Capsule Radar - Firmware</title><style>"
         "body{background:radial-gradient(circle at 50% -10%,#0a1f15,#04100a 70%);color:#cdd6d1;"
         "font-family:system-ui,sans-serif;margin:0 auto;padding:20px;max-width:480px;min-height:100vh}"
         "h1{color:#1dff86;font-size:20px}.card{background:rgba(10,20,14,.85);border:1px solid #1f3a2b;border-radius:14px;padding:16px;margin-bottom:14px}"
         ".nav{display:flex;gap:8px;margin:0 0 14px}.nav a{flex:1;text-align:center;text-decoration:none;"
         "padding:9px 8px;border:1px solid #2a4a39;border-radius:9px;color:#9affc8;background:#0c1a12}"
         ".nav a.on{background:#1dff86;color:#04140b;border-color:#1dff86;font-weight:700}"
-        "input,button{width:100%;box-sizing:border-box;padding:11px;border-radius:8px;margin-top:8px;font-size:16px}"
+        "input,button,.button{width:100%;box-sizing:border-box;padding:11px;border-radius:8px;margin-top:8px;font-size:16px;text-align:center;text-decoration:none;display:block}"
         "input{background:#0c1a12;color:#eafff3;border:1px solid #2a4a39}"
         "button{border:0;background:#1dff86;color:#04140b;font-weight:700}button:disabled{opacity:.45}.sec{background:#0c1a12;color:#1dff86;border:1px solid #2a4a39}"
-        "#bar,#rbar,#pbar{height:12px;background:#0c1a12;border-radius:6px;overflow:hidden;margin-top:14px;display:none}"
-        "#fill,#rfill,#pfill{height:100%;width:0;background:#1dff86;transition:width .2s}#msg,#rmsg,#pmsg{margin-top:10px;color:#9affc8;font-size:13px}"
+        "#rbar{height:12px;background:#0c1a12;border-radius:6px;overflow:hidden;margin-top:14px;display:none}"
+        "#rfill{height:100%;width:0;background:#1dff86;transition:width .2s}#rmsg{margin-top:10px;color:#9affc8;font-size:13px}"
         ".t{color:#1dff86;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:10px;opacity:.85}"
         "a{color:#1dff86}p{color:#9affc8;font-size:13px}"
-        "</style></head><body><h1>Firmware update (OTA)</h1>"
+        "</style></head><body><h1>Firmware</h1>"
         "<nav class=nav><a href=/>Capsule-Radar</a><a href=/tamapoke>TamaPoke</a><a href=/sprites>Sprites</a><a class=on href=/update>Firmware</a></nav>"
-        "<div class=card><div class=t>GitHub release</div>"
+        "<div class=card><div class=t>Latest release</div>"
         "<p>Current firmware: <b>v" FW_VERSION "</b></p>"
-        "<p>Check the latest GitHub Release and install the verified <code>CapsuleRadar-ota.bin</code> directly from the device.</p>"
-        "<button class=sec onclick=c()>Check GitHub</button><button id=ri disabled onclick=ri()>Install latest</button>"
-        "<button class=sec onclick=um()>Restart in lightweight updater mode</button><button class=sec onclick=xum()>Exit updater mode</button>"
+        "<p>Check whether a newer Capsule Companion release is available. Firmware installation is handled by the browser web installer.</p>"
+        "<button class=sec onclick=c()>Check for new firmware</button>"
         "<div id=rbar><div id=rfill></div></div><div id=rmsg>Waiting.</div></div>"
-        "<div class=card><div class=t>PrintSphere companion</div>"
-        "<p>Update PrintSphere in inactive slot <code>ota_1</code>. Run this from Radar; PrintSphere cannot update itself while it is running.</p>"
-        "<button class=sec onclick=pc()>Check PrintSphere</button><button id=pi disabled onclick=pi()>Install PrintSphere latest</button>"
-        "<div id=pbar><div id=pfill></div></div><div id=pmsg>Waiting.</div></div>"
-        "<div class=card><div class=t>Manual upload</div>"
-        "<p>Upload the <b>app firmware</b> <code>CapsuleRadar-ota.bin</code> from the GitHub release. "
-        "Do NOT use the merged flash image here.</p>"
-        "<input type=file id=f accept='.bin'>"
-        "<button onclick=u()>Update over WiFi</button>"
-        "<div id=bar><div id=fill></div></div><div id=msg></div></div>"
-        "<script>var ready=0,pready=0,MODE=@,pt=0,pp=0,qt=0,qp=0;"
-        "function setm(s){document.getElementById('rmsg').innerText=s}function ib(){document.getElementById('ri').disabled=!ready}"
+        "<div class=card><div class=t>Install firmware</div>"
+        "<p>Use the web installer to update or repair all firmware slots: Radar/TamaPoke and PrintSphere.</p>"
+        "<a class='button' href='https://lerxtwood.github.io/capsule-radar/' target='_blank' rel='noopener'>Open web installer</a></div>"
+        "<script>var pt=0,pp=0;"
+        "function setm(s){document.getElementById('rmsg').innerText=s}"
         "function prog(p){document.getElementById('rbar').style.display='block';document.getElementById('rfill').style.width=p+'%'}"
         "function pstart(max,step,ms){clearInterval(pt);pp=8;prog(pp);pt=setInterval(()=>{pp=Math.min(max,pp+step);prog(pp)},ms)}"
         "function pstop(p){clearInterval(pt);prog(p)}"
-        "function psetm(s){document.getElementById('pmsg').innerText=s}function pib(){document.getElementById('pi').disabled=!pready}"
-        "function pprog(p){document.getElementById('pbar').style.display='block';document.getElementById('pfill').style.width=p+'%'}"
-        "function ppstart(max,step,ms){clearInterval(qt);qp=8;pprog(qp);qt=setInterval(()=>{qp=Math.min(max,qp+step);pprog(qp)},ms)}"
-        "function ppstop(p){clearInterval(qt);pprog(p)}"
-        "function checkNow(){var b=document.getElementById('ri');b.disabled=true;setm('Checking GitHub...');pstart(85,6,650);"
+        "function checkNow(){setm('Checking GitHub...');pstart(85,6,650);"
         "return fetch('/remote-update-check').then(r=>r.json().then(j=>({ok:r.ok,j:j}))).then(o=>{if(!o.ok)throw Error(o.j.error||'Check failed');"
-        "pstop(100);ready=o.j.updateAvailable?1:0;ib();setm(o.j.message);localStorage.removeItem('crAutoCheck');return o.j;}).catch(e=>{pstop(0);ready=0;ib();setm('Check failed: '+e.message);localStorage.removeItem('crAutoCheck');});}"
-        "function pollCheck(n){setm('Restarting into lightweight updater and checking GitHub...');pstart(70,3,700);let tries=0,t=setInterval(()=>{tries++;"
-        "fetch('/remote-update-check').then(r=>r.json().then(j=>({ok:r.ok,j:j}))).then(o=>{if(!o.ok)throw Error(o.j.error||'Check failed');clearInterval(t);"
-        "pstop(100);ready=o.j.updateAvailable?1:0;ib();setm(o.j.message);localStorage.removeItem('crAutoCheck');}).catch(e=>{if(tries>n){clearInterval(t);pstop(0);ready=0;ib();setm('Check failed after updater restart: '+e.message);localStorage.removeItem('crAutoCheck');}});},2500)}"
-        "function c(){if(MODE)return checkNow();localStorage.setItem('crAutoCheck','1');ready=0;ib();setm('Restarting into lightweight updater and checking GitHub...');"
-        "fetch('/enter-update-mode',{method:'POST'}).catch(()=>{});pollCheck(24);}"
-        "function ri(){if(!ready)return;var m=document.getElementById('rmsg'),b=document.getElementById('ri');b.disabled=true;m.innerText='Downloading and installing. Do not power off...';pstart(92,2,900);"
-        "fetch('/remote-update-install',{method:'POST'}).then(r=>r.text().then(t=>({ok:r.ok,t:t}))).then(o=>{if(!o.ok)throw Error(o.t||'Install failed');pstop(100);document.open();document.write(o.t);document.close();}).catch(e=>{pstop(0);b.disabled=false;m.innerText='Install failed: '+e.message;});}"
-        "function pc(){var b=document.getElementById('pi');b.disabled=true;psetm('Checking PrintSphere release...');ppstart(85,6,650);"
-        "fetch('/printsphere-update-check').then(r=>r.json().then(j=>({ok:r.ok,j:j}))).then(o=>{if(!o.ok)throw Error(o.j.error||'Check failed');ppstop(100);pready=1;pib();psetm(o.j.message);}).catch(e=>{ppstop(0);pready=0;pib();psetm('Check failed: '+e.message);});}"
-        "function pi(){if(!pready)return;var m=document.getElementById('pmsg'),b=document.getElementById('pi');b.disabled=true;m.innerText='Downloading and installing PrintSphere. Do not power off...';ppstart(92,2,900);"
-        "fetch('/printsphere-update-install',{method:'POST'}).then(r=>r.text().then(t=>({ok:r.ok,t:t}))).then(o=>{if(!o.ok)throw Error(o.t||'Install failed');ppstop(100);document.open();document.write(o.t);document.close();}).catch(e=>{ppstop(0);b.disabled=false;m.innerText='Install failed: '+e.message;});}"
-        "function um(){document.getElementById('rmsg').innerText='Restarting into lightweight updater mode...';fetch('/enter-update-mode',{method:'POST'}).then(r=>r.text()).then(t=>{document.open();document.write(t);document.close();});}"
-        "function xum(){document.getElementById('rmsg').innerText='Restarting back to normal mode...';fetch('/exit-update-mode',{method:'POST'}).then(r=>r.text()).then(t=>{document.open();document.write(t);document.close();});}"
-        "if(localStorage.getItem('crAutoCheck')==='1'){if(MODE)setTimeout(checkNow,800);else pollCheck(24);}"
-        "function u(){var f=document.getElementById('f').files[0];if(!f){return}"
-        "var x=new XMLHttpRequest(),fd=new FormData();fd.append('f',f);"
-        "document.getElementById('bar').style.display='block';"
-        "x.upload.onprogress=function(e){if(e.lengthComputable)document.getElementById('fill').style.width=(e.loaded/e.total*100)+'%'};"
-        "x.onload=function(){document.getElementById('msg').innerText=x.responseText+' - rebooting...'};"
-        "x.onerror=function(){document.getElementById('msg').innerText='Upload failed'};"
-        "x.open('POST','/update');x.send(fd);}</script></body></html>");
+        "pstop(100);setm(o.j.message+' Use the web installer to install updates.');return o.j;}).catch(e=>{pstop(0);setm('Check failed: '+e.message);});}"
+        "function c(){checkNow();}</script></body></html>");
     page.replace("MODE=@", g_firmwareUpdateMode ? "MODE=1" : "MODE=0");
     g_web.send(200, "text/html", page);
 }
@@ -1665,42 +1589,10 @@ static void handleUpdatePage() {
 static void handleUpdateUpload() {
     HTTPUpload &up = g_web.upload();
     if (up.status == UPLOAD_FILE_START) {
-        g_firmwareUpdateInProgress = true;
-        g_updateUploadOk = false;
-        g_updateOtaHandle = 0;
-        g_updateOtaPartition = nullptr;
-        Serial.printf("[update] start: %s\n", up.filename.c_str());
-        String error;
-        if (!beginFixedRadarOta(OTA_SIZE_UNKNOWN, g_updateOtaHandle, g_updateOtaPartition, error)) {
-            Serial.printf("[update] fixed-slot begin failed: %s\n", error.c_str());
-            return;
-        }
-        g_updateUploadOk = true;
-        Serial.printf("[update] fixed slot -> %s @ 0x%06x\n",
-                      g_updateOtaPartition->label, (unsigned)g_updateOtaPartition->address);
-    } else if (up.status == UPLOAD_FILE_WRITE) {
-        if (g_updateUploadOk) {
-            const esp_err_t err = esp_ota_write(g_updateOtaHandle, up.buf, up.currentSize);
-            if (err != ESP_OK) {
-                Serial.printf("[update] fixed-slot write failed: %s\n", esp_err_to_name(err));
-                esp_ota_abort(g_updateOtaHandle);
-                g_updateUploadOk = false;
-            }
-        }
+        Serial.printf("[update] upload rejected; OTA install removed: %s\n", up.filename.c_str());
     } else if (up.status == UPLOAD_FILE_END) {
-        String error;
-        if (g_updateUploadOk && finishFixedOta(g_updateOtaHandle, g_updateOtaPartition, true, error)) {
-            Serial.printf("[update] done: %u bytes -> %s\n",
-                          (unsigned)up.totalSize, g_updateOtaPartition ? g_updateOtaPartition->label : "?");
-        } else {
-            if (g_updateUploadOk) esp_ota_abort(g_updateOtaHandle);
-            Serial.printf("[update] finish failed: %s\n", error.c_str());
-            g_updateUploadOk = false;
-        }
         g_firmwareUpdateInProgress = false;
     } else if (up.status == UPLOAD_FILE_ABORTED) {
-        if (g_updateUploadOk) esp_ota_abort(g_updateOtaHandle);
-        g_updateUploadOk = false;
         g_firmwareUpdateInProgress = false;
     }
 }
@@ -1780,13 +1672,7 @@ static void setupFirmwareUpdateMode() {
     g_web.on("/printsphere-update-install", HTTP_POST, handlePrintSphereUpdateInstall);
     g_web.on("/update", HTTP_POST,
         []() {
-            const bool ok = !Update.hasError();
-            g_web.send(200, "text/plain", ok ? "OK" : "FAIL");
-            delay(800);
-            if (ok) {
-                saveFirmwareUpdateMode(false);
-                ESP.restart();
-            }
+            g_web.send(410, "text/plain", "OTA upload has been removed. Use https://lerxtwood.github.io/capsule-radar/");
             g_firmwareUpdateInProgress = false;
         },
         handleUpdateUpload);
@@ -1938,10 +1824,7 @@ void setup() {
     g_web.on("/printsphere-update-install", HTTP_POST, handlePrintSphereUpdateInstall);
     g_web.on("/update", HTTP_POST,
         []() {
-            const bool ok = !Update.hasError();
-            g_web.send(200, "text/plain", ok ? "OK" : "FAIL");
-            delay(800);
-            if (ok) ESP.restart();
+            g_web.send(410, "text/plain", "OTA upload has been removed. Use https://lerxtwood.github.io/capsule-radar/");
             g_firmwareUpdateInProgress = false;
         },
         handleUpdateUpload);
