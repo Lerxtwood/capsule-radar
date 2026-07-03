@@ -183,10 +183,13 @@ static int s_rangeIdx = -1;
 static float s_rangeKm = RANGE_KM_DEFAULT;   // current display range (km), for the stats view
 static void (*s_rangeCb)(float) = nullptr;
 static void (*s_appSwitchCb)(void) = nullptr;
+static void (*s_firmwareSwitchCb)(void) = nullptr;
 static lv_obj_t *s_zoomBtn = nullptr, *s_zoomLbl = nullptr;
+static lv_obj_t *s_tamaBtn = nullptr, *s_tamaLbl = nullptr, *s_printerBtn = nullptr, *s_printerLbl = nullptr;
 
 void ui_set_range_cb(void (*cb)(float)) { s_rangeCb = cb; }
 void ui_set_app_switch_cb(void (*cb)(void)) { s_appSwitchCb = cb; }
+void ui_set_firmware_switch_cb(void (*cb)(void)) { s_firmwareSwitchCb = cb; }
 
 static bool radar_top_center_point(lv_point_t p) {
     return p.x > 188 && p.x < 278 && p.y < 42;
@@ -217,6 +220,18 @@ void ui_set_range_km(float km) {
     s_rangeIdx = best;
 }
 
+void ui_reset_app_buttons(void) {
+    if (s_tamaBtn) lv_obj_set_style_bg_color(s_tamaBtn, UI_PANEL, 0);
+    if (s_tamaLbl) {
+        lv_label_set_text(s_tamaLbl, "Tama");
+        lv_obj_set_style_text_color(s_tamaLbl, UI_SOFT, 0);
+    }
+    if (s_printerBtn) lv_obj_set_style_bg_color(s_printerBtn, UI_PANEL, 0);
+    if (s_printerLbl) {
+        lv_label_set_text(s_printerLbl, "Print");
+        lv_obj_set_style_text_color(s_printerLbl, UI_SOFT, 0);
+    }
+}
 static void radar_press_cb(lv_event_t *e) {
     (void)e;
     s_longPressed = false;
@@ -225,11 +240,41 @@ static void radar_press_cb(lv_event_t *e) {
     if (!indev) return;
     lv_point_t p;
     lv_indev_get_point(indev, &p);
-    if (radar_top_center_point(p)) {
-        s_topTap = true;
-    }
+    if (radar_top_center_point(p)) s_topTap = true;
 }
 
+
+static void tama_btn_cb(lv_event_t *e) {
+    const lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_PRESSED) {
+        if (s_tamaBtn) lv_obj_set_style_bg_color(s_tamaBtn, UI_GREEN, 0);
+        if (s_tamaLbl) lv_obj_set_style_text_color(s_tamaLbl, lv_color_black(), 0);
+    } else if (code == LV_EVENT_CLICKED) {
+        if (s_tamaBtn) lv_obj_set_style_bg_color(s_tamaBtn, UI_GREEN, 0);
+        if (s_tamaLbl) {
+            lv_label_set_text(s_tamaLbl, "...");
+            lv_obj_set_style_text_color(s_tamaLbl, lv_color_black(), 0);
+        }
+        if (s_appSwitchCb) s_appSwitchCb();
+    }
+    lv_event_stop_bubbling(e);
+}
+
+static void printer_btn_cb(lv_event_t *e) {
+    const lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_PRESSED) {
+        if (s_printerBtn) lv_obj_set_style_bg_color(s_printerBtn, UI_GREEN, 0);
+        if (s_printerLbl) lv_obj_set_style_text_color(s_printerLbl, lv_color_black(), 0);
+    } else if (code == LV_EVENT_CLICKED) {
+        if (s_printerBtn) lv_obj_set_style_bg_color(s_printerBtn, UI_GREEN, 0);
+        if (s_printerLbl) {
+            lv_label_set_text(s_printerLbl, "...");
+            lv_obj_set_style_text_color(s_printerLbl, lv_color_black(), 0);
+        }
+        if (s_firmwareSwitchCb) s_firmwareSwitchCb();
+    }
+    lv_event_stop_bubbling(e);
+}
 static void radar_longpress_cb(lv_event_t *e) {   // long-press cycles the visual theme
     (void)e;
     lv_indev_t *indev = lv_indev_get_act();
@@ -590,6 +635,41 @@ void ui_create(void) {
     // Rebuild the list/stats with the latest data the moment they slide into view
     // (between polls they'd otherwise show whatever was there when last visible).
     lv_obj_add_event_cb(s_tv, [](lv_event_t *) { refresh_active_tile(); }, LV_EVENT_VALUE_CHANGED, nullptr);
+    s_tamaBtn = lv_btn_create(lv_layer_top());
+    lv_obj_set_size(s_tamaBtn, 76, 30);
+    lv_obj_align(s_tamaBtn, LV_ALIGN_TOP_MID, -52, 7);
+    lv_obj_set_style_radius(s_tamaBtn, 16, 0);
+    lv_obj_set_style_bg_color(s_tamaBtn, UI_PANEL, 0);
+    lv_obj_set_style_bg_opa(s_tamaBtn, LV_OPA_90, 0);
+    lv_obj_set_style_border_color(s_tamaBtn, UI_GREEN, 0);
+    lv_obj_set_style_border_opa(s_tamaBtn, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(s_tamaBtn, 1, 0);
+    lv_obj_set_style_pad_all(s_tamaBtn, 0, 0);
+    lv_obj_clear_flag(s_tamaBtn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_tamaBtn, tama_btn_cb, LV_EVENT_ALL, nullptr);
+    s_tamaLbl = lv_label_create(s_tamaBtn);
+    lv_label_set_text(s_tamaLbl, "Tama");
+    lv_obj_set_style_text_color(s_tamaLbl, UI_SOFT, 0);
+    lv_obj_center(s_tamaLbl);
+    lv_obj_move_foreground(s_tamaBtn);
+
+    s_printerBtn = lv_btn_create(lv_layer_top());
+    lv_obj_set_size(s_printerBtn, 76, 30);
+    lv_obj_align(s_printerBtn, LV_ALIGN_TOP_MID, 52, 7);
+    lv_obj_set_style_radius(s_printerBtn, 16, 0);
+    lv_obj_set_style_bg_color(s_printerBtn, UI_PANEL, 0);
+    lv_obj_set_style_bg_opa(s_printerBtn, LV_OPA_90, 0);
+    lv_obj_set_style_border_color(s_printerBtn, UI_GREEN, 0);
+    lv_obj_set_style_border_opa(s_printerBtn, LV_OPA_70, 0);
+    lv_obj_set_style_border_width(s_printerBtn, 1, 0);
+    lv_obj_set_style_pad_all(s_printerBtn, 0, 0);
+    lv_obj_clear_flag(s_printerBtn, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_printerBtn, printer_btn_cb, LV_EVENT_ALL, nullptr);
+    s_printerLbl = lv_label_create(s_printerBtn);
+    lv_label_set_text(s_printerLbl, "Print");
+    lv_obj_set_style_text_color(s_printerLbl, UI_SOFT, 0);
+    lv_obj_center(s_printerLbl);
+    lv_obj_move_foreground(s_printerBtn);
 
     // --- radar tile ---
     lv_obj_clear_flag(s_tileRadar, LV_OBJ_FLAG_SCROLLABLE);

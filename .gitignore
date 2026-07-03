@@ -17,3 +17,6 @@ dist/
 
 # Secrets (WiFi creds live in NVS on the device, never in the repo)
 secrets.h
+
+# Generated release bundles
+release/

@@ -1,4 +1,4 @@
-// Capsule Radar — entry point / glue. SKELETON: TODOs mark what to implement.
+﻿// Capsule Radar — entry point / glue. SKELETON: TODOs mark what to implement.
 // Order of work is in CLAUDE.md (milestones). Bring up the Waveshare demo first.
 #include <Arduino.h>
 #include <WiFi.h>
@@ -34,6 +34,7 @@
 #include <ESPmDNS.h>                // http://capsuleradar.local
 #include <ArduinoOTA.h>             // OTA firmware update over WiFi (PlatformIO/espota)
 #include <Update.h>                 // browser OTA: self-flash an uploaded .bin
+#include <esp_ota_ops.h>            // experimental external app slot switch
 #include <esp_heap_caps.h>          // largest-free-block metric (heap health)
 #include <mbedtls/sha256.h>         // verify downloaded firmware before flashing
 
@@ -82,6 +83,7 @@ static volatile uint32_t     g_lastFeedOkMs = 0;                     // millis()
 static volatile uint32_t     g_rebootAtMs = 0;                       // !=0: reboot when millis() reaches it (clean start after WiFi config)
 static volatile bool         g_firmwareUpdateInProgress = false;     // pause background network work while self-flashing
 static bool                  g_firmwareUpdateMode = false;           // lightweight boot mode for GitHub TLS + self-update
+static volatile bool         g_launchAlternateFirmware = false;       // reboot into the other OTA slot (experimental PrintSphere)
 static String                g_tz = TZ_STR;                          // POSIX timezone (web-configurable, NVS); applied via configTzTime
 struct PrefetchTrack { std::string hex, call; uint32_t startedMs; };
 static std::vector<PrefetchTrack> g_prefetching;
@@ -350,6 +352,7 @@ static void updatePrefetchIndicators() {
 // Double-tap zoom: change the display range, persist it, and ask adsb_task to
 // re-query at a matching radius (safely, on its own core). Re-render immediately.
 static void persistAppMode(int mode);
+static bool selectOtherOtaSlotForBoot(String &message);
 static void onRangeChange(float km) {
     g_settings.rangeKm = km;
     Preferences p;
@@ -364,10 +367,20 @@ static void onRangeChange(float km) {
 }
 
 static void requestTamapokeFromRadar() {
-    Serial.println("[app] radar top-center gesture -> TamaPoke");
+    Serial.println("[app] radar top-center tap -> TamaPoke");
     persistAppMode(1);
     g_pendingAppMode = 1;
     g_pendingAppSave = true;
+}
+
+static void requestPrintSphereFromRadar() {
+    String message;
+    if (selectOtherOtaSlotForBoot(message)) {
+        Serial.printf("[app] radar Printer button -> PrintSphere: %s\n", message.c_str());
+        g_launchAlternateFirmware = true;
+    } else {
+        Serial.printf("[app] radar PrintSphere pull-down failed: %s\n", message.c_str());
+    }
 }
 
 // Persist the visual theme in NVS (called when the user long-presses to switch).
@@ -861,6 +874,7 @@ static bool activateApp(int mode) {
     }
     g_appMode = mode;
     if (g_appMode == 0) {
+        ui_reset_app_buttons();
         display::invalidate();   // repaint over the last TamaPoke frame
         applyBrightness();
     }
@@ -1555,6 +1569,52 @@ static void handleUpdateUpload() {
     }
 }
 
+static bool selectOtherOtaSlotForBoot(String &message) {
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (!running) {
+        message = "The running OTA partition could not be identified.";
+        return false;
+    }
+
+    esp_partition_subtype_t targetSubtype = ESP_PARTITION_SUBTYPE_APP_OTA_0;
+    if (running->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_0) {
+        targetSubtype = ESP_PARTITION_SUBTYPE_APP_OTA_1;
+    } else if (running->subtype == ESP_PARTITION_SUBTYPE_APP_OTA_1) {
+        targetSubtype = ESP_PARTITION_SUBTYPE_APP_OTA_0;
+    } else {
+        message = String("The running app is not in an OTA slot: ") + running->label;
+        return false;
+    }
+
+    const esp_partition_t *target =
+        esp_partition_find_first(ESP_PARTITION_TYPE_APP, targetSubtype, nullptr);
+    if (!target) {
+        message = "The alternate OTA partition was not found.";
+        return false;
+    }
+
+    const esp_err_t err = esp_ota_set_boot_partition(target);
+    if (err != ESP_OK) {
+        message = String("Boot partition switch failed: ") + esp_err_to_name(err);
+        return false;
+    }
+
+    message = String("Switching from ") + running->label + " to " + target->label + ".";
+    Serial.printf("[app] external slot launch: %s -> %s\n", running->label, target->label);
+    return true;
+}
+
+static void handleLaunchPrintSphere() {
+    String message;
+    if (!selectOtherOtaSlotForBoot(message)) {
+        Serial.printf("[app] PrintSphere launch failed: %s\n", message.c_str());
+        g_web.send(500, "text/plain", message);
+        return;
+    }
+
+    g_launchAlternateFirmware = true;
+    g_web.send(200, "text/plain", message + " Rebooting...");
+}
 static void setupFirmwareUpdateMode() {
     g_firmwareUpdateMode = true;
     g_firmwareUpdateInProgress = false;
@@ -1575,6 +1635,7 @@ static void setupFirmwareUpdateMode() {
 
     g_web.on("/", HTTP_GET, handleUpdatePage);
     g_web.on("/update", HTTP_GET, handleUpdatePage);
+    g_web.on("/printsphere/launch", HTTP_POST, handleLaunchPrintSphere);
     g_web.on("/enter-update-mode", HTTP_POST, handleEnterUpdateMode);
     g_web.on("/exit-update-mode", HTTP_POST, handleExitUpdateMode);
     g_web.on("/remote-update-check", HTTP_GET, handleRemoteUpdateCheck);
@@ -1641,7 +1702,8 @@ void setup() {
     }
     radar::setThemeChangedCb(saveTheme);
     ui_set_range_cb(onRangeChange);              // on-screen zoom button
-    ui_set_app_switch_cb(requestTamapokeFromRadar); // top-center tap switches to TamaPoke
+    ui_set_app_switch_cb(requestTamapokeFromRadar); // Tama button switches to TamaPoke
+    ui_set_firmware_switch_cb(requestPrintSphereFromRadar); // Printer button launches PrintSphere
     ui_set_units(g_units);                       // apply saved unit preset
     ui_set_range_km(g_settings.rangeKm);         // show the loaded range
 
@@ -1772,6 +1834,7 @@ void loop() {
     if (g_firmwareUpdateMode) {
         g_web.handleClient();
         if (g_rebootAtMs && (int32_t)(millis() - g_rebootAtMs) >= 0) { delay(50); ESP.restart(); }
+        if (g_launchAlternateFirmware) { g_launchAlternateFirmware = false; Serial.println("[app] rebooting into alternate firmware slot"); delay(800); ESP.restart(); }
         delay(2);
         return;
     }
@@ -1812,6 +1875,7 @@ void loop() {
 
     // scheduled reboot after a fresh WiFi config (see setSaveConfigCallback)
     if (g_rebootAtMs && (int32_t)(millis() - g_rebootAtMs) >= 0) { delay(50); ESP.restart(); }
+    if (g_launchAlternateFirmware) { g_launchAlternateFirmware = false; Serial.println("[app] rebooting into alternate firmware slot"); delay(800); ESP.restart(); }
 
     // OTA: set up once WiFi is up, then service it every loop (flash over the air)
     static bool otaUp = false;

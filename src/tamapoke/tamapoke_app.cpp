@@ -127,6 +127,7 @@ static const uint16_t STARS[][2] = { {120,140},{330,120},{370,210},{95,230},{280
 
 bool wasPressed = false;
 static volatile bool gRequestRadarApp = false;
+static uint32_t gRadarButtonFlashUntil = 0;
 static uint8_t gTamaRotation = 0;
 static bool gDimOnUsb = false;
 // eleccion de inicial (primera partida): Bulbasaur / Charmander / Squirtle, 3 filas
@@ -209,6 +210,7 @@ void drawThumb(const uint8_t *b, int x, int y, int s, bool sil);
 void renderGallery();
 void galleryTap(int16_t x, int16_t y);
 void drawBattery();
+void drawRadarButton();
 void drawHeader(const char *name, uint16_t nameColor, const char *msg);
 void drawCeremony();
 void drawChoiceDialog();
@@ -403,6 +405,9 @@ void tamapoke_set_dim_on_usb(bool enabled) {
   Serial.printf("[tamapoke] dim while plugged in -> %d\n", enabled ? 1 : 0);
 }
 
+void tamapoke_reset_radar_button() {
+  gRadarButtonFlashUntil = 0;
+}
 bool tamapoke_consume_radar_request() {
   if (!gRequestRadarApp) return false;
   gRequestRadarApp = false;
@@ -598,10 +603,12 @@ void handleTouch() {
     int dx = tXl - tX0, dy = tYl - tY0;
     uint32_t dt = millis() - tStart;
     if (!holdFired && !swallowGesture) {
-      // Combined-firmware escape hatch: tap the top-center of the TamaPoke view to return to
-      // Capsule Radar, even when TamaPoke is the saved boot app and the radar config hint is not visible.
-      if (dt < 800 && abs(dx) < 40 && abs(dy) < 40 && tX0 > 188 && tX0 < 278 && tY0 < 42) {
-        Serial.println("[tamapoke] return-to-radar tap");
+      // Combined-firmware return button. Handle it before TamaPoke's own swipe/tap gestures.
+      if (dt < 800 && abs(dx) < 40 && abs(dy) < 40 && tX0 >= 189 && tX0 <= 277 && tY0 >= 8 && tY0 <= 42) {
+        Serial.println("[tamapoke] Radar button");
+        gRadarButtonFlashUntil = millis() + 600;
+        drawRadarButton();
+        gfx->flush();
         gRequestRadarApp = true;
       } else if (abs(dx) > 80 && abs(dy) < 70 && dt < 800) onSwipe(dx > 0 ? 1 : -1);
       else if (abs(dy) > 80 && abs(dx) < 70 && dt < 800) onSwipeV(dy > 0 ? 1 : -1);
@@ -1933,6 +1940,21 @@ void drawBattery() {
   }
 }
 
+void drawRadarButton() {
+  const bool hot = millis() < gRadarButtonFlashUntil;
+  const int x = 189, y = 8, w = 88, h = 34;
+  const uint16_t bg = hot ? UI_BAR_OK : C565(0x10, 0x25, 0x1a);
+  const uint16_t border = hot ? UI_WHITE : UI_BAR_OK;
+  const uint16_t fg = hot ? UI_BG_DAY : C565(0xa8, 0xff, 0xd2);
+  gfx->fillRoundRect(x, y, w, h, 16, bg);
+  gfx->drawRoundRect(x, y, w, h, 16, border);
+  gfx->drawRoundRect(x + 1, y + 1, w - 2, h - 2, 15, border);
+  gfx->setTextColor(fg);
+  gfx->setTextSize(2);
+  const char *label = hot ? "..." : "Radar";
+  gfx->setCursor(x + (w - (int)strlen(label) * 12) / 2, y + 9);
+  gfx->print(label);
+}
 void drawHeader(const char *name, uint16_t nameColor, const char *msg) {
   drawBattery();
   gfx->setTextColor(nameColor);
