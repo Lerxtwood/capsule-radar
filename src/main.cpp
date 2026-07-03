@@ -118,7 +118,9 @@ static const struct { const char *label; const char *tz; int offMin; int dst; } 
 static const int TZOPTS_N = sizeof(TZOPTS) / sizeof(TZOPTS[0]);
 
 static const char *RELEASE_MANIFEST_URL = "https://github.com/Lerxtwood/capsule-radar/releases/latest/download/capsule-radar-manifest.json";
+static const char *PRINTSPHERE_MANIFEST_URL = "https://github.com/Lerxtwood/capsule-radar/releases/latest/download/printsphere-manifest.json";
 static const esp_partition_subtype_t CAPSULE_RADAR_OTA_SUBTYPE = ESP_PARTITION_SUBTYPE_APP_OTA_0;
+static const esp_partition_subtype_t PRINTSPHERE_OTA_SUBTYPE = ESP_PARTITION_SUBTYPE_APP_OTA_1;
 static const uint32_t MIN_FIRMWARE_SIZE_BYTES = 512UL * 1024UL;
 
 // TamaPoke sprite installer state. The browser downloads sprites.pak from
@@ -1213,7 +1215,7 @@ static void handleSpriteUpload() {
     }
 }
 
-static bool fetchRemoteUpdateManifest(String &manifest, String &error) {
+static bool fetchRemoteUpdateManifest(const char *manifestUrl, String &manifest, String &error) {
     if (WiFi.status() != WL_CONNECTED) {
         error = "WiFi is not connected.";
         return false;
@@ -1227,7 +1229,7 @@ static bool fetchRemoteUpdateManifest(String &manifest, String &error) {
     http.setReuse(false);
     http.useHTTP10(true);
     http.setTimeout(15000);
-    if (!http.begin(client, RELEASE_MANIFEST_URL)) {
+    if (!http.begin(client, manifestUrl)) {
         error = "Could not open release manifest URL.";
         g_firmwareUpdateInProgress = false;
         return false;
@@ -1271,22 +1273,22 @@ static bool parseRemoteUpdateManifest(const String &manifest, String &version, S
     return true;
 }
 
-static const esp_partition_t *capsuleRadarOtaPartition(String &error) {
+static const esp_partition_t *fixedOtaPartition(esp_partition_subtype_t subtype, const char *label, String &error) {
     const esp_partition_t *target =
-        esp_partition_find_first(ESP_PARTITION_TYPE_APP, CAPSULE_RADAR_OTA_SUBTYPE, nullptr);
+        esp_partition_find_first(ESP_PARTITION_TYPE_APP, subtype, nullptr);
     if (!target) {
-        error = "Capsule Radar OTA slot ota_0 was not found. Reinstall with the web installer.";
+        error = String(label) + " OTA slot was not found. Reinstall with the web installer.";
         return nullptr;
     }
     return target;
 }
 
-static bool beginFixedRadarOta(uint32_t expectedSize, esp_ota_handle_t &handle,
-                               const esp_partition_t *&target, String &error) {
-    target = capsuleRadarOtaPartition(error);
+static bool beginFixedOta(esp_partition_subtype_t subtype, const char *label, uint32_t expectedSize,
+                          esp_ota_handle_t &handle, const esp_partition_t *&target, String &error) {
+    target = fixedOtaPartition(subtype, label, error);
     if (!target) return false;
     if (expectedSize != OTA_SIZE_UNKNOWN && (expectedSize == 0 || expectedSize > target->size)) {
-        error = "Firmware size does not fit Capsule Radar slot ota_0.";
+        error = String("Firmware size does not fit ") + label + " slot.";
         return false;
     }
     const esp_err_t err = esp_ota_begin(target, expectedSize, &handle);
@@ -1297,16 +1299,28 @@ static bool beginFixedRadarOta(uint32_t expectedSize, esp_ota_handle_t &handle,
     return true;
 }
 
-static bool finishFixedRadarOta(esp_ota_handle_t handle, const esp_partition_t *target, String &error) {
+static bool beginFixedRadarOta(uint32_t expectedSize, esp_ota_handle_t &handle,
+                               const esp_partition_t *&target, String &error) {
+    return beginFixedOta(CAPSULE_RADAR_OTA_SUBTYPE, "Capsule Radar ota_0", expectedSize, handle, target, error);
+}
+
+static bool beginFixedPrintSphereOta(uint32_t expectedSize, esp_ota_handle_t &handle,
+                                     const esp_partition_t *&target, String &error) {
+    return beginFixedOta(PRINTSPHERE_OTA_SUBTYPE, "PrintSphere ota_1", expectedSize, handle, target, error);
+}
+
+static bool finishFixedOta(esp_ota_handle_t handle, const esp_partition_t *target, bool setBoot, String &error) {
     esp_err_t err = esp_ota_end(handle);
     if (err != ESP_OK) {
         error = String("ESP32 firmware validation failed: ") + esp_err_to_name(err);
         return false;
     }
-    err = esp_ota_set_boot_partition(target);
-    if (err != ESP_OK) {
-        error = String("Firmware was written, but boot partition could not be set: ") + esp_err_to_name(err);
-        return false;
+    if (setBoot) {
+        err = esp_ota_set_boot_partition(target);
+        if (err != ESP_OK) {
+            error = String("Firmware was written, but boot partition could not be set: ") + esp_err_to_name(err);
+            return false;
+        }
     }
     return true;
 }
@@ -1380,7 +1394,8 @@ static void handleExitUpdateMode() {
 }
 
 static bool installRemoteFirmware(const String &firmwareUrl, const String &expectedSha256,
-                                  uint32_t expectedSize, String &error) {
+                                  uint32_t expectedSize, bool printSphereSlot, bool setBoot,
+                                  String &error) {
     if (WiFi.status() != WL_CONNECTED) {
         error = "WiFi is not connected.";
         return false;
@@ -1409,7 +1424,10 @@ static bool installRemoteFirmware(const String &firmwareUrl, const String &expec
     }
     esp_ota_handle_t otaHandle = 0;
     const esp_partition_t *targetPartition = nullptr;
-    if (!beginFixedRadarOta(expectedSize, otaHandle, targetPartition, error)) {
+    const bool began = printSphereSlot
+        ? beginFixedPrintSphereOta(expectedSize, otaHandle, targetPartition, error)
+        : beginFixedRadarOta(expectedSize, otaHandle, targetPartition, error);
+    if (!began) {
         http.end();
         g_firmwareUpdateInProgress = false;
         return false;
@@ -1478,7 +1496,7 @@ static bool installRemoteFirmware(const String &firmwareUrl, const String &expec
         g_firmwareUpdateInProgress = false;
         return false;
     }
-    if (!finishFixedRadarOta(otaHandle, targetPartition, error)) {
+    if (!finishFixedOta(otaHandle, targetPartition, setBoot, error)) {
         g_firmwareUpdateInProgress = false;
         return false;
     }
@@ -1490,7 +1508,7 @@ static bool installRemoteFirmware(const String &firmwareUrl, const String &expec
 static void handleRemoteUpdateCheck() {
     String manifest, error, version, firmwareUrl, sha256;
     uint32_t size = 0;
-    if (!fetchRemoteUpdateManifest(manifest, error) ||
+    if (!fetchRemoteUpdateManifest(RELEASE_MANIFEST_URL, manifest, error) ||
         !parseRemoteUpdateManifest(manifest, version, firmwareUrl, sha256, size, error)) {
         g_web.send(500, "application/json", "{\"error\":\"" + jsonEscape(error) + "\"}");
         return;
@@ -1507,7 +1525,7 @@ static void handleRemoteUpdateCheck() {
 static void handleRemoteUpdateInstall() {
     String manifest, error, version, firmwareUrl, sha256;
     uint32_t size = 0;
-    if (!fetchRemoteUpdateManifest(manifest, error) ||
+    if (!fetchRemoteUpdateManifest(RELEASE_MANIFEST_URL, manifest, error) ||
         !parseRemoteUpdateManifest(manifest, version, firmwareUrl, sha256, size, error)) {
         g_firmwareUpdateInProgress = false;
         g_web.send(500, "text/plain", error);
@@ -1518,7 +1536,7 @@ static void handleRemoteUpdateInstall() {
         return;
     }
     Serial.printf("[update] installing remote firmware %s (%u bytes)\n", version.c_str(), (unsigned)size);
-    if (!installRemoteFirmware(firmwareUrl, sha256, size, error)) {
+    if (!installRemoteFirmware(firmwareUrl, sha256, size, false, true, error)) {
         g_web.send(500, "text/plain", error);
         return;
     }
@@ -1532,6 +1550,43 @@ static void handleRemoteUpdateInstall() {
     delay(900);
     saveFirmwareUpdateMode(false);
     ESP.restart();
+}
+
+static void handlePrintSphereUpdateCheck() {
+    String manifest, error, version, firmwareUrl, sha256;
+    uint32_t size = 0;
+    if (!fetchRemoteUpdateManifest(PRINTSPHERE_MANIFEST_URL, manifest, error) ||
+        !parseRemoteUpdateManifest(manifest, version, firmwareUrl, sha256, size, error)) {
+        g_web.send(500, "application/json", "{\"error\":\"" + jsonEscape(error) + "\"}");
+        return;
+    }
+    String msg = "PrintSphere companion release " + version + " is available (" + String(size) +
+                 " bytes). This will update ota_1 while Capsule Radar keeps running.";
+    String out = "{\"remoteVersion\":\"" + jsonEscape(version) + "\",\"updateAvailable\":true" +
+                 String(",\"size\":") + String(size) + ",\"message\":\"" + jsonEscape(msg) + "\"}";
+    g_web.send(200, "application/json", out);
+}
+
+static void handlePrintSphereUpdateInstall() {
+    String manifest, error, version, firmwareUrl, sha256;
+    uint32_t size = 0;
+    if (!fetchRemoteUpdateManifest(PRINTSPHERE_MANIFEST_URL, manifest, error) ||
+        !parseRemoteUpdateManifest(manifest, version, firmwareUrl, sha256, size, error)) {
+        g_firmwareUpdateInProgress = false;
+        g_web.send(500, "text/plain", error);
+        return;
+    }
+    Serial.printf("[update] installing PrintSphere companion firmware %s (%u bytes)\n",
+                  version.c_str(), (unsigned)size);
+    if (!installRemoteFirmware(firmwareUrl, sha256, size, true, false, error)) {
+        g_web.send(500, "text/plain", error);
+        return;
+    }
+    g_web.send(200, "text/html",
+        "<!DOCTYPE html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
+        "<body style='background:#06100a;color:#1dff86;font-family:system-ui,sans-serif;padding:24px'>"
+        "<h1>PrintSphere updated</h1><p>Downloaded and verified version " + version +
+        " into ota_1. You can switch to PrintSphere when ready.</p><p><a style='color:#1dff86' href='/update'>Back to Firmware</a></p></body></html>");
 }
 
 static void handleUpdatePage() {
@@ -1548,9 +1603,8 @@ static void handleUpdatePage() {
         "input,button{width:100%;box-sizing:border-box;padding:11px;border-radius:8px;margin-top:8px;font-size:16px}"
         "input{background:#0c1a12;color:#eafff3;border:1px solid #2a4a39}"
         "button{border:0;background:#1dff86;color:#04140b;font-weight:700}button:disabled{opacity:.45}.sec{background:#0c1a12;color:#1dff86;border:1px solid #2a4a39}"
-        "#bar{height:12px;background:#0c1a12;border-radius:6px;overflow:hidden;margin-top:14px;display:none}"
-        "#fill,#rfill{height:100%;width:0;background:#1dff86;transition:width .2s}#msg,#rmsg{margin-top:10px;color:#9affc8;font-size:13px}"
-        "#rbar{height:12px;background:#0c1a12;border-radius:6px;overflow:hidden;margin-top:14px;display:none}"
+        "#bar,#rbar,#pbar{height:12px;background:#0c1a12;border-radius:6px;overflow:hidden;margin-top:14px;display:none}"
+        "#fill,#rfill,#pfill{height:100%;width:0;background:#1dff86;transition:width .2s}#msg,#rmsg,#pmsg{margin-top:10px;color:#9affc8;font-size:13px}"
         ".t{color:#1dff86;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:10px;opacity:.85}"
         "a{color:#1dff86}p{color:#9affc8;font-size:13px}"
         "</style></head><body><h1>Firmware update (OTA)</h1>"
@@ -1561,17 +1615,25 @@ static void handleUpdatePage() {
         "<button class=sec onclick=c()>Check GitHub</button><button id=ri disabled onclick=ri()>Install latest</button>"
         "<button class=sec onclick=um()>Restart in lightweight updater mode</button><button class=sec onclick=xum()>Exit updater mode</button>"
         "<div id=rbar><div id=rfill></div></div><div id=rmsg>Waiting.</div></div>"
+        "<div class=card><div class=t>PrintSphere companion</div>"
+        "<p>Update PrintSphere in inactive slot <code>ota_1</code>. Run this from Radar; PrintSphere cannot update itself while it is running.</p>"
+        "<button class=sec onclick=pc()>Check PrintSphere</button><button id=pi disabled onclick=pi()>Install PrintSphere latest</button>"
+        "<div id=pbar><div id=pfill></div></div><div id=pmsg>Waiting.</div></div>"
         "<div class=card><div class=t>Manual upload</div>"
         "<p>Upload the <b>app firmware</b> <code>CapsuleRadar-ota.bin</code> from the GitHub release. "
         "Do NOT use the merged flash image here.</p>"
         "<input type=file id=f accept='.bin'>"
         "<button onclick=u()>Update over WiFi</button>"
         "<div id=bar><div id=fill></div></div><div id=msg></div></div>"
-        "<script>var ready=0,MODE=@,pt=0,pp=0;"
+        "<script>var ready=0,pready=0,MODE=@,pt=0,pp=0,qt=0,qp=0;"
         "function setm(s){document.getElementById('rmsg').innerText=s}function ib(){document.getElementById('ri').disabled=!ready}"
         "function prog(p){document.getElementById('rbar').style.display='block';document.getElementById('rfill').style.width=p+'%'}"
         "function pstart(max,step,ms){clearInterval(pt);pp=8;prog(pp);pt=setInterval(()=>{pp=Math.min(max,pp+step);prog(pp)},ms)}"
         "function pstop(p){clearInterval(pt);prog(p)}"
+        "function psetm(s){document.getElementById('pmsg').innerText=s}function pib(){document.getElementById('pi').disabled=!pready}"
+        "function pprog(p){document.getElementById('pbar').style.display='block';document.getElementById('pfill').style.width=p+'%'}"
+        "function ppstart(max,step,ms){clearInterval(qt);qp=8;pprog(qp);qt=setInterval(()=>{qp=Math.min(max,qp+step);pprog(qp)},ms)}"
+        "function ppstop(p){clearInterval(qt);pprog(p)}"
         "function checkNow(){var b=document.getElementById('ri');b.disabled=true;setm('Checking GitHub...');pstart(85,6,650);"
         "return fetch('/remote-update-check').then(r=>r.json().then(j=>({ok:r.ok,j:j}))).then(o=>{if(!o.ok)throw Error(o.j.error||'Check failed');"
         "pstop(100);ready=o.j.updateAvailable?1:0;ib();setm(o.j.message);localStorage.removeItem('crAutoCheck');return o.j;}).catch(e=>{pstop(0);ready=0;ib();setm('Check failed: '+e.message);localStorage.removeItem('crAutoCheck');});}"
@@ -1582,6 +1644,10 @@ static void handleUpdatePage() {
         "fetch('/enter-update-mode',{method:'POST'}).catch(()=>{});pollCheck(24);}"
         "function ri(){if(!ready)return;var m=document.getElementById('rmsg'),b=document.getElementById('ri');b.disabled=true;m.innerText='Downloading and installing. Do not power off...';pstart(92,2,900);"
         "fetch('/remote-update-install',{method:'POST'}).then(r=>r.text().then(t=>({ok:r.ok,t:t}))).then(o=>{if(!o.ok)throw Error(o.t||'Install failed');pstop(100);document.open();document.write(o.t);document.close();}).catch(e=>{pstop(0);b.disabled=false;m.innerText='Install failed: '+e.message;});}"
+        "function pc(){var b=document.getElementById('pi');b.disabled=true;psetm('Checking PrintSphere release...');ppstart(85,6,650);"
+        "fetch('/printsphere-update-check').then(r=>r.json().then(j=>({ok:r.ok,j:j}))).then(o=>{if(!o.ok)throw Error(o.j.error||'Check failed');ppstop(100);pready=1;pib();psetm(o.j.message);}).catch(e=>{ppstop(0);pready=0;pib();psetm('Check failed: '+e.message);});}"
+        "function pi(){if(!pready)return;var m=document.getElementById('pmsg'),b=document.getElementById('pi');b.disabled=true;m.innerText='Downloading and installing PrintSphere. Do not power off...';ppstart(92,2,900);"
+        "fetch('/printsphere-update-install',{method:'POST'}).then(r=>r.text().then(t=>({ok:r.ok,t:t}))).then(o=>{if(!o.ok)throw Error(o.t||'Install failed');ppstop(100);document.open();document.write(o.t);document.close();}).catch(e=>{ppstop(0);b.disabled=false;m.innerText='Install failed: '+e.message;});}"
         "function um(){document.getElementById('rmsg').innerText='Restarting into lightweight updater mode...';fetch('/enter-update-mode',{method:'POST'}).then(r=>r.text()).then(t=>{document.open();document.write(t);document.close();});}"
         "function xum(){document.getElementById('rmsg').innerText='Restarting back to normal mode...';fetch('/exit-update-mode',{method:'POST'}).then(r=>r.text()).then(t=>{document.open();document.write(t);document.close();});}"
         "if(localStorage.getItem('crAutoCheck')==='1'){if(MODE)setTimeout(checkNow,800);else pollCheck(24);}"
@@ -1623,7 +1689,7 @@ static void handleUpdateUpload() {
         }
     } else if (up.status == UPLOAD_FILE_END) {
         String error;
-        if (g_updateUploadOk && finishFixedRadarOta(g_updateOtaHandle, g_updateOtaPartition, error)) {
+        if (g_updateUploadOk && finishFixedOta(g_updateOtaHandle, g_updateOtaPartition, true, error)) {
             Serial.printf("[update] done: %u bytes -> %s\n",
                           (unsigned)up.totalSize, g_updateOtaPartition ? g_updateOtaPartition->label : "?");
         } else {
@@ -1710,6 +1776,8 @@ static void setupFirmwareUpdateMode() {
     g_web.on("/exit-update-mode", HTTP_POST, handleExitUpdateMode);
     g_web.on("/remote-update-check", HTTP_GET, handleRemoteUpdateCheck);
     g_web.on("/remote-update-install", HTTP_POST, handleRemoteUpdateInstall);
+    g_web.on("/printsphere-update-check", HTTP_GET, handlePrintSphereUpdateCheck);
+    g_web.on("/printsphere-update-install", HTTP_POST, handlePrintSphereUpdateInstall);
     g_web.on("/update", HTTP_POST,
         []() {
             const bool ok = !Update.hasError();
@@ -1866,6 +1934,8 @@ void setup() {
     g_web.on("/exit-update-mode", HTTP_POST, handleExitUpdateMode);
     g_web.on("/remote-update-check", HTTP_GET, handleRemoteUpdateCheck);
     g_web.on("/remote-update-install", HTTP_POST, handleRemoteUpdateInstall);
+    g_web.on("/printsphere-update-check", HTTP_GET, handlePrintSphereUpdateCheck);
+    g_web.on("/printsphere-update-install", HTTP_POST, handlePrintSphereUpdateInstall);
     g_web.on("/update", HTTP_POST,
         []() {
             const bool ok = !Update.hasError();
