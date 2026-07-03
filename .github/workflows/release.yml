@@ -54,6 +54,38 @@ jobs:
           cp "$B/firmware.bin" CapsuleRadar-ota.bin
           cp "$P/printsphere_idf.bin" PrintSphere-ota.bin
           curl -L --fail -o sprites.pak "https://socquique.github.io/TamaPoke/web/sprites.pak"
+          TAG="${GITHUB_REF_NAME}"
+          CAPSULE_SHA="$(sha256sum CapsuleRadar-ota.bin | awk '{print $1}')"
+          CAPSULE_SIZE="$(stat -c%s CapsuleRadar-ota.bin)"
+          PRINTSPHERE_SHA="$(sha256sum PrintSphere-ota.bin | awk '{print $1}')"
+          PRINTSPHERE_SIZE="$(stat -c%s PrintSphere-ota.bin)"
+          BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cat > capsule-radar-manifest.json <<EOF
+          {
+            "version": "${TAG#v}",
+            "board": "esp32-s3-amoled-175",
+            "slot": "ota_0",
+            "offset": 1114112,
+            "firmware": "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/CapsuleRadar-ota.bin",
+            "sha256": "${CAPSULE_SHA}",
+            "size": ${CAPSULE_SIZE},
+            "commit": "${GITHUB_SHA::7}",
+            "builtAtUtc": "${BUILT_AT}"
+          }
+          EOF
+          cat > printsphere-manifest.json <<EOF
+          {
+            "version": "${TAG#v}",
+            "board": "esp32-s3-amoled-175",
+            "slot": "ota_1",
+            "offset": 6356992,
+            "firmware": "https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/PrintSphere-ota.bin",
+            "sha256": "${PRINTSPHERE_SHA}",
+            "size": ${PRINTSPHERE_SIZE},
+            "commit": "${GITHUB_SHA::7}",
+            "builtAtUtc": "${BUILT_AT}"
+          }
+          EOF
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
@@ -64,6 +96,8 @@ jobs:
             ota_data_initial.bin
             CapsuleRadar-ota.bin
             PrintSphere-ota.bin
+            capsule-radar-manifest.json
+            printsphere-manifest.json
             sprites.pak
           generate_release_notes: true
           body: |
@@ -77,7 +111,9 @@ jobs:
             - Browser, no toolchain: https://lerxtwood.github.io/capsule-radar/
             - Or: `esptool.py --chip esp32s3 write_flash 0x0 bootloader.bin 0x8000 partition-table.bin 0x109000 ota_data_initial.bin 0x110000 CapsuleRadar-ota.bin 0x610000 PrintSphere-ota.bin`
 
-            **Per-app WiFi updates:** next step. Until the fixed-slot updaters are finished, use the browser installer or the fixed-offset `esptool.py` command above for multi-firmware installs.
+            **Per-app WiFi updates:** each firmware updater uses its own fixed-slot manifest:
+            - Capsule Radar/TamaPoke: `capsule-radar-manifest.json` -> `ota_0`
+            - PrintSphere: `printsphere-manifest.json` -> `ota_1`
 
             **TamaPoke sprites:** `sprites.pak` — optional SD-card sprite bundle used by the browser installer.
 

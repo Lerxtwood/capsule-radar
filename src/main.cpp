@@ -33,7 +33,7 @@
 #include <SD_MMC.h>                 // SD sprite installer
 #include <ESPmDNS.h>                // http://capsuleradar.local
 #include <ArduinoOTA.h>             // OTA firmware update over WiFi (PlatformIO/espota)
-#include <Update.h>                 // browser OTA: self-flash an uploaded .bin
+#include <Update.h>                 // ArduinoOTA dependency / legacy API
 #include <esp_ota_ops.h>            // experimental external app slot switch
 #include <esp_heap_caps.h>          // largest-free-block metric (heap health)
 #include <mbedtls/sha256.h>         // verify downloaded firmware before flashing
@@ -67,6 +67,9 @@ static volatile bool         g_pendingAppSave = false;               // save req
 static bool                  g_tamapokeBootGuard = false;            // saved guest app boot is still proving itself
 static uint32_t              g_tamapokeBootGuardUntilMs = 0;
 static bool                  g_spriteLoaderSdStarted = false;        // lazy-mount SD when Web Serial uploads sprites
+static esp_ota_handle_t      g_updateOtaHandle = 0;                  // fixed-slot web upload OTA session
+static const esp_partition_t *g_updateOtaPartition = nullptr;
+static bool                  g_updateUploadOk = false;
 static bool                  g_showAirports = true;                  // airport markers on/off (web/NVS)
 static int                   g_rotation = 0;                         // display rotation 0/1/2/3 = 0/90/180/270 (web/NVS)
 static int                   g_rotationOffset = 0;                   // fine display rotation adjustment, degrees (web/NVS)
@@ -114,7 +117,8 @@ static const struct { const char *label; const char *tz; int offMin; int dst; } 
 };
 static const int TZOPTS_N = sizeof(TZOPTS) / sizeof(TZOPTS[0]);
 
-static const char *RELEASE_MANIFEST_URL = "https://github.com/Lerxtwood/capsule-radar/releases/latest/download/manifest.json";
+static const char *RELEASE_MANIFEST_URL = "https://github.com/Lerxtwood/capsule-radar/releases/latest/download/capsule-radar-manifest.json";
+static const esp_partition_subtype_t CAPSULE_RADAR_OTA_SUBTYPE = ESP_PARTITION_SUBTYPE_APP_OTA_0;
 static const uint32_t MIN_FIRMWARE_SIZE_BYTES = 512UL * 1024UL;
 
 // TamaPoke sprite installer state. The browser downloads sprites.pak from
@@ -1267,6 +1271,46 @@ static bool parseRemoteUpdateManifest(const String &manifest, String &version, S
     return true;
 }
 
+static const esp_partition_t *capsuleRadarOtaPartition(String &error) {
+    const esp_partition_t *target =
+        esp_partition_find_first(ESP_PARTITION_TYPE_APP, CAPSULE_RADAR_OTA_SUBTYPE, nullptr);
+    if (!target) {
+        error = "Capsule Radar OTA slot ota_0 was not found. Reinstall with the web installer.";
+        return nullptr;
+    }
+    return target;
+}
+
+static bool beginFixedRadarOta(uint32_t expectedSize, esp_ota_handle_t &handle,
+                               const esp_partition_t *&target, String &error) {
+    target = capsuleRadarOtaPartition(error);
+    if (!target) return false;
+    if (expectedSize != OTA_SIZE_UNKNOWN && (expectedSize == 0 || expectedSize > target->size)) {
+        error = "Firmware size does not fit Capsule Radar slot ota_0.";
+        return false;
+    }
+    const esp_err_t err = esp_ota_begin(target, expectedSize, &handle);
+    if (err != ESP_OK) {
+        error = String("Could not start fixed-slot firmware update: ") + esp_err_to_name(err);
+        return false;
+    }
+    return true;
+}
+
+static bool finishFixedRadarOta(esp_ota_handle_t handle, const esp_partition_t *target, String &error) {
+    esp_err_t err = esp_ota_end(handle);
+    if (err != ESP_OK) {
+        error = String("ESP32 firmware validation failed: ") + esp_err_to_name(err);
+        return false;
+    }
+    err = esp_ota_set_boot_partition(target);
+    if (err != ESP_OK) {
+        error = String("Firmware was written, but boot partition could not be set: ") + esp_err_to_name(err);
+        return false;
+    }
+    return true;
+}
+
 static uint16_t versionPart(const String &version, uint8_t partIndex) {
     uint8_t currentPart = 0;
     uint16_t value = 0;
@@ -1363,9 +1407,9 @@ static bool installRemoteFirmware(const String &firmwareUrl, const String &expec
         g_firmwareUpdateInProgress = false;
         return false;
     }
-    if (!Update.begin(expectedSize)) {
-        error = "Could not start firmware update.";
-        Update.printError(Serial);
+    esp_ota_handle_t otaHandle = 0;
+    const esp_partition_t *targetPartition = nullptr;
+    if (!beginFixedRadarOta(expectedSize, otaHandle, targetPartition, error)) {
         http.end();
         g_firmwareUpdateInProgress = false;
         return false;
@@ -1385,7 +1429,7 @@ static bool installRemoteFirmware(const String &firmwareUrl, const String &expec
         if (available == 0) {
             if (millis() - lastReadAt > 20000UL) {
                 error = "Firmware download timed out.";
-                Update.abort();
+                esp_ota_abort(otaHandle);
                 mbedtls_sha256_free(&shaContext);
                 http.end();
                 g_firmwareUpdateInProgress = false;
@@ -1402,9 +1446,10 @@ static bool installRemoteFirmware(const String &firmwareUrl, const String &expec
         if (bytesRead <= 0) continue;
         lastReadAt = millis();
         mbedtls_sha256_update(&shaContext, buffer, bytesRead);
-        if (Update.write(buffer, bytesRead) != (size_t)bytesRead) {
-            error = "Firmware flash write failed.";
-            Update.abort();
+        const esp_err_t writeErr = esp_ota_write(otaHandle, buffer, bytesRead);
+        if (writeErr != ESP_OK) {
+            error = String("Firmware flash write failed: ") + esp_err_to_name(writeErr);
+            esp_ota_abort(otaHandle);
             mbedtls_sha256_free(&shaContext);
             http.end();
             g_firmwareUpdateInProgress = false;
@@ -1415,7 +1460,7 @@ static bool installRemoteFirmware(const String &firmwareUrl, const String &expec
     http.end();
     if (written != expectedSize) {
         error = "Firmware download size mismatch.";
-        Update.abort();
+        esp_ota_abort(otaHandle);
         mbedtls_sha256_free(&shaContext);
         g_firmwareUpdateInProgress = false;
         return false;
@@ -1429,17 +1474,16 @@ static bool installRemoteFirmware(const String &firmwareUrl, const String &expec
     actualSha256[64] = '\0';
     if (expectedSha256 != String(actualSha256)) {
         error = "Firmware SHA-256 verification failed.";
-        Update.abort();
+        esp_ota_abort(otaHandle);
         g_firmwareUpdateInProgress = false;
         return false;
     }
-    if (!Update.end(true)) {
-        error = "ESP32 firmware validation failed.";
-        Update.printError(Serial);
+    if (!finishFixedRadarOta(otaHandle, targetPartition, error)) {
         g_firmwareUpdateInProgress = false;
         return false;
     }
-    Serial.printf("[update] remote done: %u bytes sha256=%s\n", (unsigned)written, actualSha256);
+    Serial.printf("[update] remote done: %u bytes sha256=%s -> %s @ 0x%06x\n",
+                  (unsigned)written, actualSha256, targetPartition->label, (unsigned)targetPartition->address);
     return true;
 }
 
@@ -1556,15 +1600,41 @@ static void handleUpdateUpload() {
     HTTPUpload &up = g_web.upload();
     if (up.status == UPLOAD_FILE_START) {
         g_firmwareUpdateInProgress = true;
+        g_updateUploadOk = false;
+        g_updateOtaHandle = 0;
+        g_updateOtaPartition = nullptr;
         Serial.printf("[update] start: %s\n", up.filename.c_str());
-        if (!Update.begin(UPDATE_SIZE_UNKNOWN)) Update.printError(Serial);
+        String error;
+        if (!beginFixedRadarOta(OTA_SIZE_UNKNOWN, g_updateOtaHandle, g_updateOtaPartition, error)) {
+            Serial.printf("[update] fixed-slot begin failed: %s\n", error.c_str());
+            return;
+        }
+        g_updateUploadOk = true;
+        Serial.printf("[update] fixed slot -> %s @ 0x%06x\n",
+                      g_updateOtaPartition->label, (unsigned)g_updateOtaPartition->address);
     } else if (up.status == UPLOAD_FILE_WRITE) {
-        if (Update.write(up.buf, up.currentSize) != up.currentSize) Update.printError(Serial);
+        if (g_updateUploadOk) {
+            const esp_err_t err = esp_ota_write(g_updateOtaHandle, up.buf, up.currentSize);
+            if (err != ESP_OK) {
+                Serial.printf("[update] fixed-slot write failed: %s\n", esp_err_to_name(err));
+                esp_ota_abort(g_updateOtaHandle);
+                g_updateUploadOk = false;
+            }
+        }
     } else if (up.status == UPLOAD_FILE_END) {
-        if (Update.end(true)) Serial.printf("[update] done: %u bytes\n", (unsigned)up.totalSize);
-        else Update.printError(Serial);
+        String error;
+        if (g_updateUploadOk && finishFixedRadarOta(g_updateOtaHandle, g_updateOtaPartition, error)) {
+            Serial.printf("[update] done: %u bytes -> %s\n",
+                          (unsigned)up.totalSize, g_updateOtaPartition ? g_updateOtaPartition->label : "?");
+        } else {
+            if (g_updateUploadOk) esp_ota_abort(g_updateOtaHandle);
+            Serial.printf("[update] finish failed: %s\n", error.c_str());
+            g_updateUploadOk = false;
+        }
+        g_firmwareUpdateInProgress = false;
     } else if (up.status == UPLOAD_FILE_ABORTED) {
-        Update.abort();
+        if (g_updateUploadOk) esp_ota_abort(g_updateOtaHandle);
+        g_updateUploadOk = false;
         g_firmwareUpdateInProgress = false;
     }
 }
