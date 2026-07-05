@@ -33,6 +33,22 @@ jobs:
       - name: Install PlatformIO + esptool
         run: pip install platformio esptool
 
+      - name: Stamp shared release version
+        run: |
+          export VERSION="${GITHUB_REF_NAME#v}"
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+          version = os.environ["VERSION"]
+          path = Path("src/config.h")
+          text = path.read_text()
+          text = re.sub(r'#define FW_VERSION "[^"]+"',
+                        f'#define FW_VERSION "{version}"',
+                        text)
+          path.write_text(text)
+          PY
+
       - name: Build firmware
         run: pio run -e esp32-s3-amoled-175
 
@@ -42,7 +58,7 @@ jobs:
           esp_idf_version: v5.5.4
           target: esp32s3
           path: PrintSphere
-          command: idf.py -D PRINTSPHERE_HW_VARIANT=amoled_1_75 build
+          command: bash -lc 'idf.py -D PRINTSPHERE_HW_VARIANT=amoled_1_75 -D PRINTSPHERE_RELEASE_VERSION=${GITHUB_REF_NAME#v} build'
 
       - name: Collect release assets
         run: |

@@ -35,6 +35,7 @@
 #include <ArduinoOTA.h>             // OTA firmware update over WiFi (PlatformIO/espota)
 #include <Update.h>                 // ArduinoOTA dependency / legacy API
 #include <esp_ota_ops.h>            // experimental external app slot switch
+#include <esp_wifi.h>               // export shared Wi-Fi credentials for companion firmware
 #include <esp_heap_caps.h>          // largest-free-block metric (heap health)
 #include <mbedtls/sha256.h>         // verify downloaded firmware before flashing
 
@@ -78,6 +79,7 @@ static int                   g_trailLen = 2;                         // aircraft
 static int                   g_trackingFontSize = 0;                 // aircraft floating labels 0=small 1=medium 2=large
 static volatile bool         g_onBattery = false;                    // discharging (set on core 1, read on core 0)
 static bool                  g_rtcSynced = false;                    // RTC written from NTP this session?
+static bool                  g_sharedWifiExported = false;           // write Wi-Fi creds once per successful boot
 static std::vector<Aircraft> g_snap;                                 // last snapshot (instant re-render on zoom)
 static volatile bool         g_requery = false;                      // range changed -> adsb_task re-begins
 static float                 g_requeryKm = 0.0f;
@@ -1365,6 +1367,35 @@ static bool firmwareUpdateModeSaved() {
     return enabled;
 }
 
+static void exportSharedWifiCredentials() {
+    if (g_sharedWifiExported || WiFi.status() != WL_CONNECTED) return;
+
+    wifi_config_t cfg = {};
+    if (esp_wifi_get_config(WIFI_IF_STA, &cfg) != ESP_OK) {
+        Serial.println("[wifi] shared credential export skipped: esp_wifi_get_config failed");
+        return;
+    }
+
+    const char *ssid = reinterpret_cast<const char *>(cfg.sta.ssid);
+    const char *pass = reinterpret_cast<const char *>(cfg.sta.password);
+    if (ssid == nullptr || ssid[0] == '\0') {
+        Serial.println("[wifi] shared credential export skipped: SSID unavailable");
+        return;
+    }
+
+    Preferences p;
+    if (!p.begin("capsule_shared", false)) {
+        Serial.println("[wifi] shared credential export skipped: NVS open failed");
+        return;
+    }
+    p.putString("wifi_ssid", ssid);
+    p.putString("wifi_pass", pass != nullptr ? pass : "");
+    p.end();
+
+    g_sharedWifiExported = true;
+    Serial.printf("[wifi] shared credentials exported for companion firmware (ssid=%s)\n", ssid);
+}
+
 static void saveFirmwareUpdateMode(bool enabled) {
     Preferences p;
     if (!p.begin("cr_app", false)) return;
@@ -1903,6 +1934,7 @@ void loop() {
     // OTA: set up once WiFi is up, then service it every loop (flash over the air)
     static bool otaUp = false;
     if (!otaUp && WiFi.status() == WL_CONNECTED) {
+        exportSharedWifiCredentials();
         ArduinoOTA.setHostname("capsuleradar");        // -> capsuleradar.local (registers mDNS)
         ArduinoOTA.begin();
         MDNS.addService("http", "tcp", 80);            // advertise the config web page
