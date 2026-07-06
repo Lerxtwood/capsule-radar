@@ -19,12 +19,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Checkout PrintSphere companion firmware
         uses: actions/checkout@v4
         with:
           repository: Lerxtwood/PrintSphere
           path: PrintSphere
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -60,6 +63,54 @@ jobs:
           path: PrintSphere
           command: idf.py -D PRINTSPHERE_HW_VARIANT=amoled_1_75 -D PRINTSPHERE_RELEASE_VERSION=${{ github.ref_name }} build
 
+      - name: Generate release note manifests
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import subprocess
+          from pathlib import Path
+
+          def run(args, cwd="."):
+              return subprocess.check_output(args, cwd=cwd, text=True).strip()
+
+          def subjects(args, cwd="."):
+              try:
+                  out = run(args, cwd=cwd)
+              except subprocess.CalledProcessError:
+                  out = ""
+              notes = []
+              for line in out.splitlines():
+                  line = line.strip()
+                  if line and line not in notes:
+                      notes.append(line)
+              return notes[:20]
+
+          current_tag = os.environ.get("GITHUB_REF_NAME", "")
+          previous_tag = ""
+          try:
+              tags = run(["git", "tag", "--sort=-creatordate"]).splitlines()
+              for tag in tags:
+                  if tag != current_tag:
+                      previous_tag = tag
+                      break
+          except Exception:
+              previous_tag = ""
+
+          if previous_tag:
+              capsule_notes = subjects(["git", "log", "--format=%s", f"{previous_tag}..HEAD"])
+              previous_tag_date = run(["git", "log", "-1", "--format=%cI", previous_tag])
+              printsphere_notes = subjects(["git", "log", "--format=%s", f"--since={previous_tag_date}"], cwd="PrintSphere")
+          else:
+              capsule_notes = subjects(["git", "log", "--format=%s", "-n", "20"])
+              printsphere_notes = subjects(["git", "log", "--format=%s", "-n", "20"], cwd="PrintSphere")
+
+          Path("capsule-radar-release-notes.json").write_text(json.dumps(capsule_notes, ensure_ascii=False))
+          Path("printsphere-release-notes.json").write_text(json.dumps(printsphere_notes, ensure_ascii=False))
+          print("Capsule release notes:", capsule_notes)
+          print("PrintSphere release notes:", printsphere_notes)
+          PY
+
       - name: Collect release assets
         run: |
           B=.pio/build/esp32-s3-amoled-175
@@ -75,6 +126,8 @@ jobs:
           CAPSULE_SIZE="$(stat -c%s CapsuleRadar-ota.bin)"
           PRINTSPHERE_SHA="$(sha256sum PrintSphere-ota.bin | awk '{print $1}')"
           PRINTSPHERE_SIZE="$(stat -c%s PrintSphere-ota.bin)"
+          CAPSULE_NOTES="$(cat capsule-radar-release-notes.json)"
+          PRINTSPHERE_NOTES="$(cat printsphere-release-notes.json)"
           BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           cat > capsule-radar-manifest.json <<EOF
           {
@@ -86,7 +139,8 @@ jobs:
             "sha256": "${CAPSULE_SHA}",
             "size": ${CAPSULE_SIZE},
             "commit": "${GITHUB_SHA::7}",
-            "builtAtUtc": "${BUILT_AT}"
+            "builtAtUtc": "${BUILT_AT}",
+            "releaseNotes": ${CAPSULE_NOTES}
           }
           EOF
           cat > printsphere-manifest.json <<EOF
@@ -99,7 +153,8 @@ jobs:
             "sha256": "${PRINTSPHERE_SHA}",
             "size": ${PRINTSPHERE_SIZE},
             "commit": "${GITHUB_SHA::7}",
-            "builtAtUtc": "${BUILT_AT}"
+            "builtAtUtc": "${BUILT_AT}",
+            "releaseNotes": ${PRINTSPHERE_NOTES}
           }
           EOF
 

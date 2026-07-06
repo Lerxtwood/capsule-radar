@@ -1137,6 +1137,39 @@ static String jsonValueForKey(const String &json, const String &key) {
     return value;
 }
 
+static String jsonArrayForKey(const String &json, const String &key) {
+    const String pattern = "\"" + key + "\"";
+    int keyIndex = json.indexOf(pattern);
+    if (keyIndex < 0) return "[]";
+    int colonIndex = json.indexOf(':', keyIndex + pattern.length());
+    if (colonIndex < 0) return "[]";
+    int valueStart = colonIndex + 1;
+    while (valueStart < (int)json.length() && isspace((unsigned char)json[valueStart])) valueStart++;
+    if (valueStart >= (int)json.length() || json[valueStart] != '[') return "[]";
+    int depth = 0;
+    bool inString = false;
+    bool escaped = false;
+    for (int i = valueStart; i < (int)json.length(); ++i) {
+        const char c = json[i];
+        if (escaped) {
+            escaped = false;
+            continue;
+        }
+        if (inString) {
+            if (c == '\\') escaped = true;
+            else if (c == '"') inString = false;
+            continue;
+        }
+        if (c == '"') inString = true;
+        else if (c == '[') depth++;
+        else if (c == ']') {
+            depth--;
+            if (depth == 0) return json.substring(valueStart, i + 1);
+        }
+    }
+    return "[]";
+}
+
 static bool spritePathSafe(const char *name) {
     if (!name || !name[0] || strlen(name) > 80) return false;
     if (strstr(name, "..") || strchr(name, '\\') || name[0] == '/') return false;
@@ -1547,9 +1580,11 @@ static void handleRemoteUpdateCheck() {
     const bool newer = isRemoteVersionNewer(version);
     String msg = newer ? "Version " + version + " is available (" + String(size) + " bytes)."
                        : "Current firmware " + String(FW_VERSION) + " is up to date.";
+    String releaseNotes = jsonArrayForKey(manifest, "releaseNotes");
     String out = "{\"currentVersion\":\"" + jsonEscape(FW_VERSION) + "\",\"remoteVersion\":\"" +
                  jsonEscape(version) + "\",\"updateAvailable\":" + (newer ? "true" : "false") +
-                 ",\"size\":" + String(size) + ",\"message\":\"" + jsonEscape(msg) + "\"}";
+                 ",\"size\":" + String(size) + ",\"message\":\"" + jsonEscape(msg) +
+                 "\",\"releaseNotes\":" + releaseNotes + "}";
     g_web.send(200, "application/json", out);
 }
 
@@ -1567,8 +1602,10 @@ static void handlePrintSphereUpdateCheck() {
     }
     String msg = "PrintSphere companion release " + version + " is available (" + String(size) +
                  " bytes). This will update ota_1 while Capsule Radar keeps running.";
+    String releaseNotes = jsonArrayForKey(manifest, "releaseNotes");
     String out = "{\"remoteVersion\":\"" + jsonEscape(version) + "\",\"updateAvailable\":true" +
-                 String(",\"size\":") + String(size) + ",\"message\":\"" + jsonEscape(msg) + "\"}";
+                 String(",\"size\":") + String(size) + ",\"message\":\"" + jsonEscape(msg) +
+                 "\",\"releaseNotes\":" + releaseNotes + "}";
     g_web.send(200, "application/json", out);
 }
 
@@ -1592,6 +1629,8 @@ static void handleUpdatePage() {
         "button{border:0;background:#1dff86;color:#04140b;font-weight:700}button:disabled{opacity:.45}.sec{background:#0c1a12;color:#1dff86;border:1px solid #2a4a39}"
         "#rbar{height:12px;background:#0c1a12;border-radius:6px;overflow:hidden;margin-top:14px;display:none}"
         "#rfill{height:100%;width:0;background:#1dff86;transition:width .2s}#rmsg{margin-top:10px;color:#9affc8;font-size:13px}"
+        "#rnotes{display:none;margin-top:12px;border-top:1px solid #1f3a2b;padding-top:10px;color:#cdd6d1;font-size:13px}"
+        "#rnotes ul{margin:8px 0 0 18px;padding:0}#rnotes li{margin:5px 0}"
         ".t{color:#1dff86;font-size:11px;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:10px;opacity:.85}"
         "a{color:#1dff86}p{color:#9affc8;font-size:13px}"
         "</style></head><body><h1>Firmware</h1>"
@@ -1600,18 +1639,21 @@ static void handleUpdatePage() {
         "<p>Current firmware: <b>v" FW_VERSION "</b></p>"
         "<p>Check whether a newer Capsule Companion release is available. Firmware installation is handled by the browser web installer.</p>"
         "<button class=sec onclick=c()>Check for new firmware</button>"
-        "<div id=rbar><div id=rfill></div></div><div id=rmsg>Waiting.</div></div>"
+        "<div id=rbar><div id=rfill></div></div><div id=rmsg>Waiting.</div><div id=rnotes></div></div>"
         "<div class=card><div class=t>Install firmware</div>"
         "<p>Use the web installer to update or repair all firmware slots: Radar/TamaPoke and PrintSphere.</p>"
         "<a class='button' href='https://lerxtwood.github.io/capsule-radar/' target='_blank' rel='noopener'>Open web installer</a></div>"
         "<script>var pt=0,pp=0;"
         "function setm(s){document.getElementById('rmsg').innerText=s}"
+        "function notes(a){let n=document.getElementById('rnotes');if(!a||!a.length){n.style.display='none';n.innerHTML='';return}"
+        "n.style.display='block';n.innerHTML='<b>Release notes</b><ul>'+a.map(x=>'<li>'+String(x).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))+'</li>').join('')+'</ul>'}"
         "function prog(p){document.getElementById('rbar').style.display='block';document.getElementById('rfill').style.width=p+'%'}"
         "function pstart(max,step,ms){clearInterval(pt);pp=8;prog(pp);pt=setInterval(()=>{pp=Math.min(max,pp+step);prog(pp)},ms)}"
         "function pstop(p){clearInterval(pt);prog(p)}"
         "function checkNow(){setm('Checking GitHub...');pstart(85,6,650);"
+        "notes([]);"
         "return fetch('/remote-update-check').then(r=>r.json().then(j=>({ok:r.ok,j:j}))).then(o=>{if(!o.ok)throw Error(o.j.error||'Check failed');"
-        "pstop(100);setm(o.j.message+' Use the web installer to install updates.');return o.j;}).catch(e=>{pstop(0);setm('Check failed: '+e.message);});}"
+        "pstop(100);setm(o.j.message+' Use the web installer to install updates.');notes(o.j.releaseNotes);return o.j;}).catch(e=>{pstop(0);setm('Check failed: '+e.message);});}"
         "function c(){checkNow();}</script></body></html>");
     page.replace("MODE=@", g_firmwareUpdateMode ? "MODE=1" : "MODE=0");
     g_web.send(200, "text/html", page);
