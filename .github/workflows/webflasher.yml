@@ -8,6 +8,8 @@ name: Deploy web installer
 #   ota_data_initial.bin
 #   CapsuleRadar-ota.bin
 #   PrintSphere-ota.bin
+#   capsule-radar-manifest.json
+#   printsphere-manifest.json
 # and the TamaPoke sprite bundle:
 #   sprites.pak
 #
@@ -61,6 +63,12 @@ jobs:
           curl -L --fail \
             -o site/PrintSphere-ota.bin \
             "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/PrintSphere-ota.bin"
+          curl -L --fail \
+            -o site/capsule-radar-manifest.json \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/capsule-radar-manifest.json"
+          curl -L --fail \
+            -o site/printsphere-manifest.json \
+            "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/printsphere-manifest.json"
           curl -L --fail \
             -o site/sprites.pak \
             "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/sprites.pak"
