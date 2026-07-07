@@ -1,4 +1,4 @@
-﻿name: Release firmware
+name: Release firmware
 
 # Push a tag like v1.0.0 to build the companion firmware images and attach them
 # to a GitHub Release. The browser web installer mirrors the bootloader,
@@ -13,10 +13,15 @@ on:
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 jobs:
   release:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -184,5 +189,27 @@ jobs:
 
             **Firmware updates:** use the browser web installer above. The firmware pages can check the latest release, but installs are handled by the web installer so all slots stay consistent.
 
-            **TamaPoke sprites:** `sprites.pak` — optional SD-card sprite bundle used by the browser installer.
+            **TamaPoke sprites:** `sprites.pak` � optional SD-card sprite bundle used by the browser installer.
 
+
+      - name: Prepare web installer site
+        run: |
+          mkdir -p site
+          cp -R web/flash/. site/
+          cp bootloader.bin site/bootloader.bin
+          cp partition-table.bin site/partition-table.bin
+          cp ota_data_initial.bin site/ota_data_initial.bin
+          cp CapsuleRadar-ota.bin site/CapsuleRadar-ota.bin
+          cp PrintSphere-ota.bin site/PrintSphere-ota.bin
+          cp capsule-radar-manifest.json site/capsule-radar-manifest.json
+          cp printsphere-manifest.json site/printsphere-manifest.json
+          cp sprites.pak site/sprites.pak
+
+      - name: Upload web installer artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy web installer
+        id: deployment
+        uses: actions/deploy-pages@v4
