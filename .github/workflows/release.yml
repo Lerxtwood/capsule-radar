@@ -19,9 +19,6 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -189,7 +186,7 @@ jobs:
 
             **Firmware updates:** use the browser web installer above. The firmware pages can check the latest release, but installs are handled by the web installer so all slots stay consistent.
 
-            **TamaPoke sprites:** `sprites.pak` — optional SD-card sprite bundle used by the browser installer.
+            **TamaPoke sprites:** `sprites.pak` - optional SD-card sprite bundle used by the browser installer.
 
 
       - name: Prepare web installer site
