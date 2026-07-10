@@ -62,6 +62,18 @@
     border: 1px solid #2d5140;
     color: var(--soft);
   }
+  select {
+    width: 100%;
+    max-width: 320px;
+    border-radius: 12px;
+    border: 1px solid #2d5140;
+    background: #07110b;
+    color: var(--ink);
+    padding: 11px 12px;
+    font-size: 15px;
+    font-weight: 700;
+    margin: 6px auto 14px;
+  }
   button:disabled { opacity: .48; cursor: not-allowed; }
   .actions { display:flex; flex-wrap:wrap; gap:10px; justify-content:center; margin:16px 0 8px; }
   .bar {
@@ -165,9 +177,14 @@
 
     <div class="card">
       <h2>1. Install firmware</h2>
-      <div class="pill">Uses the latest GitHub Release multi-slot images</div>
+      <div class="pill">Uses GitHub Release multi-slot images</div>
       <p style="margin-top:0">Flash from Chrome or Edge - no PlatformIO or Arduino install needed.</p>
-      <esp-web-install-button manifest="manifest.json">
+      <label for="firmwareVersion" class="note" style="display:block;margin:0 0 4px">Firmware version</label>
+      <select id="firmwareVersion">
+        <option value="latest">Latest release</option>
+      </select>
+      <div id="firmwareVersionStatus" class="note">Loading available releases...</div>
+      <esp-web-install-button id="firmwareInstall" manifest="manifest.json">
         <button slot="activate">Install all firmware</button>
         <span slot="unsupported">Use Chrome or Edge on desktop. Web Serial is required.</span>
         <span slot="not-allowed">This page must be served over HTTPS or localhost.</span>
@@ -216,6 +233,111 @@
     </div>
   </div>
 <script>
+(() => {
+  const owner = 'Lerxtwood';
+  const repo = 'capsule-radar';
+  const requiredAssets = [
+    ['bootloader.bin', 0],
+    ['partition-table.bin', 32768],
+    ['ota_data_initial.bin', 1085440],
+    ['CapsuleRadar-ota.bin', 1114112],
+    ['PrintSphere-ota.bin', 6356992],
+  ];
+  const select = document.getElementById('firmwareVersion');
+  const status = document.getElementById('firmwareVersionStatus');
+  const installer = document.getElementById('firmwareInstall');
+  let releases = [];
+  let manifestUrl = '';
+
+  function revokeManifestUrl() {
+    if (manifestUrl) {
+      URL.revokeObjectURL(manifestUrl);
+      manifestUrl = '';
+    }
+  }
+
+  function releaseLabel(release, index) {
+    const tag = release?.tag_name || 'latest';
+    const name = release?.name && release.name !== tag ? ` - ${release.name}` : '';
+    return `${tag}${index === 0 ? ' (latest)' : ''}${name}`;
+  }
+
+  function setLocalLatestManifest() {
+    revokeManifestUrl();
+    installer.setAttribute('manifest', 'manifest.json');
+  }
+
+  function assetUrl(release, name) {
+    return release.assets?.find(asset => asset.name === name)?.browser_download_url || '';
+  }
+
+  function setReleaseManifest(release) {
+    if (!release) {
+      setLocalLatestManifest();
+      return;
+    }
+    const missing = requiredAssets.filter(([name]) => !assetUrl(release, name)).map(([name]) => name);
+    if (missing.length) {
+      throw new Error(`${release.tag_name} is missing ${missing.join(', ')}`);
+    }
+    const manifest = {
+      name: `Capsule Companion ${release.tag_name}`,
+      version: release.tag_name.replace(/^v/, ''),
+      new_install_prompt_erase: true,
+      builds: [{
+        chipFamily: 'ESP32-S3',
+        parts: requiredAssets.map(([name, offset]) => ({
+          path: assetUrl(release, name),
+          offset,
+        })),
+      }],
+    };
+    revokeManifestUrl();
+    manifestUrl = URL.createObjectURL(new Blob([JSON.stringify(manifest)], {
+      type: 'application/json',
+    }));
+    installer.setAttribute('manifest', manifestUrl);
+  }
+
+  async function loadReleases() {
+    try {
+      const resp = await fetch(`https://api.github.com/repos/${owner}/${repo}/releases?per_page=30`, {
+        headers: { Accept: 'application/vnd.github+json' },
+      });
+      if (!resp.ok) throw new Error(`GitHub HTTP ${resp.status}`);
+      releases = (await resp.json()).filter(release =>
+        !release.draft &&
+        requiredAssets.every(([name]) => assetUrl(release, name))
+      );
+      if (!releases.length) throw new Error('No compatible releases found');
+      select.replaceChildren(...releases.map((release, index) => {
+        const option = document.createElement('option');
+        option.value = release.tag_name;
+        option.textContent = releaseLabel(release, index);
+        return option;
+      }));
+      setReleaseManifest(releases[0]);
+      status.textContent = `Ready: ${releases.length} installable release${releases.length === 1 ? '' : 's'} found.`;
+    } catch (err) {
+      setLocalLatestManifest();
+      status.textContent = `Release list unavailable; using bundled latest manifest. ${err.message}`;
+    }
+  }
+
+  select.addEventListener('change', () => {
+    try {
+      const release = releases.find(item => item.tag_name === select.value);
+      setReleaseManifest(release || releases[0]);
+      status.textContent = `Selected ${select.value}.`;
+    } catch (err) {
+      status.textContent = `Could not select ${select.value}: ${err.message}`;
+      setLocalLatestManifest();
+    }
+  });
+
+  loadReleases();
+})();
+
 (() => {
   const connectBtn = document.getElementById('spriteConnect');
   const listBtn = document.getElementById('spriteList');
