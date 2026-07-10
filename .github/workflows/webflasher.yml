@@ -72,6 +72,7 @@ jobs:
           curl -L --fail \
             -o site/sprites.pak \
             "https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/sprites.pak"
+          python tools/build_web_release_index.py --site site --limit 12
 
       - uses: actions/upload-pages-artifact@v3
         with:

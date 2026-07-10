@@ -234,41 +234,19 @@
   </div>
 <script>
 (() => {
-  const owner = 'Lerxtwood';
-  const repo = 'capsule-radar';
-  const requiredAssets = [
-    ['bootloader.bin', 0],
-    ['partition-table.bin', 32768],
-    ['ota_data_initial.bin', 1085440],
-    ['CapsuleRadar-ota.bin', 1114112],
-    ['PrintSphere-ota.bin', 6356992],
-  ];
   const select = document.getElementById('firmwareVersion');
   const status = document.getElementById('firmwareVersionStatus');
   const installer = document.getElementById('firmwareInstall');
   let releases = [];
-  let manifestUrl = '';
-
-  function revokeManifestUrl() {
-    if (manifestUrl) {
-      URL.revokeObjectURL(manifestUrl);
-      manifestUrl = '';
-    }
-  }
-
-  function releaseLabel(release, index) {
-    const tag = release?.tag_name || 'latest';
-    const name = release?.name && release.name !== tag ? ` - ${release.name}` : '';
-    return `${tag}${index === 0 ? ' (latest)' : ''}${name}`;
-  }
 
   function setLocalLatestManifest() {
-    revokeManifestUrl();
     installer.setAttribute('manifest', 'manifest.json');
   }
 
-  function assetUrl(release, name) {
-    return release.assets?.find(asset => asset.name === name)?.browser_download_url || '';
+  function releaseLabel(release, index) {
+    const tag = release?.tag || release?.version || 'latest';
+    const latest = release?.latest || index === 0 ? ' (latest)' : '';
+    return `${tag}${latest}`;
   }
 
   function setReleaseManifest(release) {
@@ -276,43 +254,18 @@
       setLocalLatestManifest();
       return;
     }
-    const missing = requiredAssets.filter(([name]) => !assetUrl(release, name)).map(([name]) => name);
-    if (missing.length) {
-      throw new Error(`${release.tag_name} is missing ${missing.join(', ')}`);
-    }
-    const manifest = {
-      name: `Capsule Companion ${release.tag_name}`,
-      version: release.tag_name.replace(/^v/, ''),
-      new_install_prompt_erase: true,
-      builds: [{
-        chipFamily: 'ESP32-S3',
-        parts: requiredAssets.map(([name, offset]) => ({
-          path: assetUrl(release, name),
-          offset,
-        })),
-      }],
-    };
-    revokeManifestUrl();
-    manifestUrl = URL.createObjectURL(new Blob([JSON.stringify(manifest)], {
-      type: 'application/json',
-    }));
-    installer.setAttribute('manifest', manifestUrl);
+    installer.setAttribute('manifest', release.manifest || 'manifest.json');
   }
 
   async function loadReleases() {
     try {
-      const resp = await fetch(`https://api.github.com/repos/${owner}/${repo}/releases?per_page=30`, {
-        headers: { Accept: 'application/vnd.github+json' },
-      });
-      if (!resp.ok) throw new Error(`GitHub HTTP ${resp.status}`);
-      releases = (await resp.json()).filter(release =>
-        !release.draft &&
-        requiredAssets.every(([name]) => assetUrl(release, name))
-      );
+      const resp = await fetch('release-index.json', { cache: 'no-store' });
+      if (!resp.ok) throw new Error(`release index HTTP ${resp.status}`);
+      releases = (await resp.json()).filter(release => release.manifest);
       if (!releases.length) throw new Error('No compatible releases found');
       select.replaceChildren(...releases.map((release, index) => {
         const option = document.createElement('option');
-        option.value = release.tag_name;
+        option.value = release.tag || release.version || String(index);
         option.textContent = releaseLabel(release, index);
         return option;
       }));
@@ -326,7 +279,9 @@
 
   select.addEventListener('change', () => {
     try {
-      const release = releases.find(item => item.tag_name === select.value);
+      const release = releases.find((item, index) =>
+        (item.tag || item.version || String(index)) === select.value
+      );
       setReleaseManifest(release || releases[0]);
       status.textContent = `Selected ${select.value}.`;
     } catch (err) {

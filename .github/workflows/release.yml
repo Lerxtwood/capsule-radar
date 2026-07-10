@@ -201,6 +201,7 @@ jobs:
           cp capsule-radar-manifest.json site/capsule-radar-manifest.json
           cp printsphere-manifest.json site/printsphere-manifest.json
           cp sprites.pak site/sprites.pak
+          CURRENT_TAG="${GITHUB_REF_NAME}" python tools/build_web_release_index.py --site site --limit 12
 
       - name: Upload web installer artifact
         uses: actions/upload-pages-artifact@v3
