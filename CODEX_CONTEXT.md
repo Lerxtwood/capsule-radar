@@ -145,6 +145,7 @@ Helpful log messages to watch:
   - printing a second copy of the same file,
   - starting a print while the previous cloud state still looks active,
   - early multi-color prints where filament changes happen on layer 1.
+- PrintSphere thermal behavior may need a future pass. User observed noticeable heat from the metal case while PrintSphere is running. No change was made yet, but likely contributors to revisit are: light sleep disabled, default brightness around 80%, USB power save defaulting off, and always-awake behavior during active prints.
 - PrintSphere release/build time is expected to be longer now because the capsule-radar workflow builds both PlatformIO firmware and ESP-IDF PrintSphere firmware, then deploys Pages.
 - GitHub Actions may show a Node.js deprecation warning for upstream actions; this has not blocked releases.
 
@@ -171,4 +172,3 @@ gh -R Lerxtwood/capsule-radar release view --json tagName,url
 ```
 
 Then ask what the user is seeing on the current firmware before making changes.
-
