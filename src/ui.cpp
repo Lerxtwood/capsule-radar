@@ -33,6 +33,10 @@ static lv_obj_t *s_statsNet = nullptr;
 static lv_obj_t *s_hudGps   = nullptr;   // HUD satellite icon (hidden unless GPS auto-location is on)
 static lv_obj_t *s_statsGps = nullptr;   // Stats view GPS status line
 static char s_lastDetailLookupHex[8] = "";
+static constexpr lv_coord_t CARD_W = 300;
+static constexpr lv_coord_t CARD_BASE_H = 118;
+static constexpr lv_coord_t CARD_ROUTE_Y = 74;
+static constexpr lv_coord_t CARD_ROUTE_W = 276;
 
 // --------------------------------------------------------------------- units
 // 0 = Aviation (ft, kt, km) · 1 = Metric (m, km/h, km) · 2 = Imperial (ft, mph, mi).
@@ -153,13 +157,16 @@ static void refresh_card(void) {
         snprintf(s_lastRouteReq, sizeof(s_lastRouteReq), "%s", routeReqKey);
         route_request(in.hex, in.call, in.lat, in.lon, in.track);
     }
-    char rfrom[40], rto[40];
+    char routeLine1[96], routeLine2[96];
     bool routeReady = false;
     if (!in.call[0]) {
         lv_label_set_text(s_cardRoute, "Route -");                 // no callsign -> nothing to look up
-    } else if (route_get(in.hex, in.call, rfrom, sizeof(rfrom), rto, sizeof(rto))) {
-        char rt[96];
-        if (rfrom[0] || rto[0]) snprintf(rt, sizeof(rt), "%s -> %s", rfrom[0] ? rfrom : "?", rto[0] ? rto : "?");
+    } else if (route_get(in.hex, in.call, routeLine1, sizeof(routeLine1), routeLine2, sizeof(routeLine2))) {
+        char rt[224];
+        if (routeLine1[0] || routeLine2[0]) snprintf(rt, sizeof(rt), "%s%s%s",
+                                                     routeLine1[0] ? routeLine1 : "?",
+                                                     routeLine2[0] ? "\n" : "",
+                                                     routeLine2[0] ? routeLine2 : "");
         else                    snprintf(rt, sizeof(rt), "Route unavailable");
         fold_ascii(rt);
         lv_label_set_text(s_cardRoute, rt);
@@ -168,6 +175,9 @@ static void refresh_card(void) {
         route_request(in.hex, in.call, in.lat, in.lon, in.track); // queue/re-prioritize a cache miss
         lv_label_set_text(s_cardRoute, "Looking up route...");     // pending: lookup in flight
     }
+    lv_obj_update_layout(s_cardRoute);
+    const lv_coord_t routeH = lv_obj_get_height(s_cardRoute);
+    lv_obj_set_height(s_card, LV_MAX(CARD_BASE_H, CARD_ROUTE_Y + routeH + 12));
 
     // aircraft photo (planespotters), shown above the card when one is available
     if (in.hex[0]) photo_request(in.hex, in.type);
@@ -556,7 +566,7 @@ static lv_obj_t *make_round_panel(lv_obj_t *parent) {
 static void build_card(void) {
     s_card = lv_obj_create(s_tileRadar);
     lv_obj_remove_style_all(s_card);
-    lv_obj_set_size(s_card, 300, 118);
+    lv_obj_set_size(s_card, CARD_W, CARD_BASE_H);
     lv_obj_align(s_card, LV_ALIGN_CENTER, 0, 66);
     lv_obj_set_style_bg_color(s_card, UI_PANEL, 0);
     lv_obj_set_style_bg_opa(s_card, 235, 0);
@@ -585,9 +595,11 @@ static void build_card(void) {
     lv_obj_align(s_cardR, LV_ALIGN_TOP_LEFT, 150, 26);
 
     s_cardRoute = lv_label_create(s_card);
-    lv_obj_set_style_text_font(s_cardRoute, &lv_font_montserrat_14, 0);
+    lv_obj_set_width(s_cardRoute, CARD_ROUTE_W);
+    lv_label_set_long_mode(s_cardRoute, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_font(s_cardRoute, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(s_cardRoute, UI_GREEN, 0);
-    lv_obj_align(s_cardRoute, LV_ALIGN_TOP_LEFT, 0, 76);
+    lv_obj_align(s_cardRoute, LV_ALIGN_TOP_LEFT, 0, CARD_ROUTE_Y);
 
     // aircraft photo + credit, floating above the card (hidden until one loads)
     s_photo = lv_canvas_create(s_tileRadar);

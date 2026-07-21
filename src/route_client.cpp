@@ -22,6 +22,11 @@ static constexpr int ROUTE_SCORE_PERSIST = 4;
 static char s_lastFetchMode[16] = "none";
 static char s_lastFetchUrl[128] = "";
 static int  s_lastFetchStatus = 0;
+static constexpr size_t FLIGHTAWARE_SCRAPE_LIMIT = 65536;
+static const char *FLIGHTAWARE_USER_AGENT =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0.0.0 Safari/537.36";
 
 struct RouteEndpoint {
     char label[40];
@@ -77,7 +82,7 @@ static void route_learn_key(const char *callsign, char *out, size_t on) {
     snprintf(out, on, "l%08lx", static_cast<unsigned long>(route_identity_hash("", callsign)));
 }
 
-#define ROUTE_FMT_VER 7   // bump to invalidate cache after adding route correlation heuristics
+#define ROUTE_FMT_VER 9   // bump to invalidate cache after switching to two-line route formatting
 #define ROUTE_LEARN_FMT_VER 1
 
 static void route_fetch_reset_debug() {
@@ -97,9 +102,9 @@ void route_cache_begin() {
     l.end();
 }
 
-bool route_cache_get(const char *hex, const char *callsign, char *from, size_t fn, char *to, size_t tn) {
-    if (fn) from[0] = 0;
-    if (tn) to[0] = 0;
+bool route_cache_get(const char *hex, const char *callsign, char *line1, size_t l1n, char *line2, size_t l2n) {
+    if (l1n) line1[0] = 0;
+    if (l2n) line2[0] = 0;
     if (!ROUTE_NVS_CACHE_READS_ENABLED) return false;
     if ((!hex || !hex[0]) && (!callsign || !callsign[0])) return false;
     char key[12];
@@ -118,12 +123,12 @@ bool route_cache_get(const char *hex, const char *callsign, char *from, size_t f
     if (b2 < 0) return false;
     const uint32_t now = (uint32_t)time(nullptr);    // expire stale routes (reused callsigns)
     if (now > 1700000000UL && ts > 1700000000UL && (now - ts) > ROUTE_CACHE_TTL_S) return false;
-    snprintf(from, fn, "%s", rest.substring(0, b2).c_str());
-    snprintf(to, tn, "%s", rest.substring(b2 + 1).c_str());
+    snprintf(line1, l1n, "%s", rest.substring(0, b2).c_str());
+    snprintf(line2, l2n, "%s", rest.substring(b2 + 1).c_str());
     return true;
 }
 
-void route_cache_put(const char *hex, const char *callsign, const char *from, const char *to) {
+void route_cache_put(const char *hex, const char *callsign, const char *line1, const char *line2) {
     if ((!hex || !hex[0]) && (!callsign || !callsign[0])) return;
     char key[12];
     route_cache_key(hex, callsign, key, sizeof(key));
@@ -132,7 +137,7 @@ void route_cache_put(const char *hex, const char *callsign, const char *from, co
     if (!p.begin("routes", false)) return;
     int n = p.getInt("__n", 0);
     if (n >= ROUTE_CACHE_MAX) { p.clear(); n = 0; }   // wrap to bound NVS usage
-    String v = String((uint32_t)time(nullptr)) + "|" + String(from ? from : "") + "|" + String(to ? to : "");
+    String v = String((uint32_t)time(nullptr)) + "|" + String(line1 ? line1 : "") + "|" + String(line2 ? line2 : "");
     if (p.putString(key, v) > 0) p.putInt("__n", n + 1);
     p.end();
 }
@@ -163,12 +168,206 @@ static void fill_endpoint(JsonObjectConst ap, RouteEndpoint &ep) {
     pick_airport(ap, ep.label, sizeof(ep.label));
     const char *iata = ap["iata_code"] | "";
     const char *icao = ap["icao_code"] | "";
-    snprintf(ep.code, sizeof(ep.code), "%s", iata[0] ? iata : icao);
+    snprintf(ep.code, sizeof(ep.code), "%s", icao[0] ? icao : iata);
     if (!ap["latitude"].isNull() && !ap["longitude"].isNull()) {
         ep.lat = ap["latitude"].as<float>();
         ep.lon = ap["longitude"].as<float>();
         ep.hasCoord = true;
     }
+}
+
+static void trim_ascii(char *s) {
+    if (!s) return;
+    size_t len = strlen(s);
+    size_t start = 0;
+    while (start < len && (s[start] == ' ' || s[start] == '\t' || s[start] == '\r' || s[start] == '\n')) start++;
+    size_t end = len;
+    while (end > start && (s[end - 1] == ' ' || s[end - 1] == '\t' || s[end - 1] == '\r' || s[end - 1] == '\n')) end--;
+    if (start > 0) memmove(s, s + start, end - start);
+    s[end - start] = 0;
+}
+
+static void html_decode_basic(char *s) {
+    if (!s || !s[0]) return;
+    char out[64];
+    size_t oi = 0;
+    for (size_t i = 0; s[i] && oi + 1 < sizeof(out); ) {
+        if (!strncmp(s + i, "&#39;", 5)) {
+            out[oi++] = '\'';
+            i += 5;
+        } else if (!strncmp(s + i, "&amp;", 5)) {
+            out[oi++] = '&';
+            i += 5;
+        } else if (!strncmp(s + i, "&quot;", 6)) {
+            out[oi++] = '"';
+            i += 6;
+        } else {
+            out[oi++] = s[i++];
+        }
+    }
+    out[oi] = 0;
+    snprintf(s, 64, "%s", out);
+}
+
+static bool extract_attr_value(const String &html, const char *needle, char *out, size_t on) {
+    if (!needle || !needle[0] || !out || on == 0) return false;
+    const int tagStart = html.indexOf(needle);
+    if (tagStart < 0) return false;
+    const int contentPos = html.indexOf("content=\"", tagStart);
+    if (contentPos < 0) return false;
+    const int valueStart = contentPos + 9;
+    const int valueEnd = html.indexOf('"', valueStart);
+    if (valueEnd <= valueStart) return false;
+    snprintf(out, on, "%s", html.substring(valueStart, valueEnd).c_str());
+    return true;
+}
+
+static bool extract_between(const String &html, const char *startNeedle, const char *endNeedle,
+                            char *out, size_t on) {
+    if (!startNeedle || !endNeedle || !out || on == 0) return false;
+    const int start = html.indexOf(startNeedle);
+    if (start < 0) return false;
+    const int valueStart = start + strlen(startNeedle);
+    const int end = html.indexOf(endNeedle, valueStart);
+    if (end <= valueStart) return false;
+    snprintf(out, on, "%s", html.substring(valueStart, end).c_str());
+    return true;
+}
+
+static void code_to_label(const char *code, char *out, size_t on) {
+    if (!out || on == 0) return;
+    out[0] = 0;
+    if (!code || !code[0]) return;
+    char norm[8] = "";
+    normalize_token(code, norm, sizeof(norm));
+    if (strlen(norm) == 4 && norm[0] == 'K') snprintf(out, on, "%s", norm + 1);
+    else                                      snprintf(out, on, "%s", norm);
+}
+
+static bool parse_flightaware_description(const char *desc, RouteEndpoint &from, RouteEndpoint &to) {
+    if (!desc || !desc[0]) return false;
+    const char *fromNeedle = strstr(desc, " flight from ");
+    if (!fromNeedle) return false;
+    fromNeedle += 13;
+    const char *toNeedle = strstr(fromNeedle, " to ");
+    if (!toNeedle || toNeedle <= fromNeedle) return false;
+
+    char fromLabel[sizeof(from.label)] = "";
+    char toLabel[sizeof(to.label)] = "";
+    size_t fromLen = static_cast<size_t>(toNeedle - fromNeedle);
+    size_t toLen = strlen(toNeedle + 4);
+    if (fromLen >= sizeof(fromLabel)) fromLen = sizeof(fromLabel) - 1;
+    if (toLen >= sizeof(toLabel)) toLen = sizeof(toLabel) - 1;
+    memcpy(fromLabel, fromNeedle, fromLen);
+    fromLabel[fromLen] = 0;
+    memcpy(toLabel, toNeedle + 4, toLen);
+    toLabel[toLen] = 0;
+    html_decode_basic(fromLabel);
+    html_decode_basic(toLabel);
+    trim_ascii(fromLabel);
+    trim_ascii(toLabel);
+    if (!fromLabel[0] || !toLabel[0]) return false;
+    snprintf(from.label, sizeof(from.label), "%s", fromLabel);
+    snprintf(to.label, sizeof(to.label), "%s", toLabel);
+    return true;
+}
+
+static void endpoint_code_or_label(const RouteEndpoint &ep, char *out, size_t on) {
+    if (!out || on == 0) return;
+    out[0] = 0;
+    if (ep.code[0]) snprintf(out, on, "%s", ep.code);
+    else            snprintf(out, on, "%s", ep.label[0] ? ep.label : "?");
+}
+
+static void format_route_lines(const RouteEndpoint &fromEp, const RouteEndpoint &toEp,
+                               bool flightAware, bool oldRoute,
+                               char *line1, size_t l1n, char *line2, size_t l2n) {
+    char fromCode[16] = "", toCode[16] = "";
+    endpoint_code_or_label(fromEp, fromCode, sizeof(fromCode));
+    endpoint_code_or_label(toEp, toCode, sizeof(toCode));
+    snprintf(line1, l1n, "%s -> %s%s%s",
+             fromCode[0] ? fromCode : "?",
+             toCode[0] ? toCode : "?",
+             flightAware ? " (FlightAware)" : "",
+             oldRoute ? " (old)" : "");
+    snprintf(line2, l2n, "%s -> %s",
+             fromEp.label[0] ? fromEp.label : (fromCode[0] ? fromCode : "?"),
+             toEp.label[0] ? toEp.label : (toCode[0] ? toCode : "?"));
+}
+
+static bool route_fetch_flightaware(const char *callsign, char *line1, size_t l1n, char *line2, size_t l2n) {
+    if (!callsign || !callsign[0]) return false;
+
+    char url[128];
+    snprintf(url, sizeof(url), "https://www.flightaware.com/live/flight/%s", callsign);
+    snprintf(s_lastFetchUrl, sizeof(s_lastFetchUrl), "%s", url);
+
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient http;
+    http.setReuse(false);
+    http.setConnectTimeout(3000);
+    http.setTimeout(5000);
+    http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
+    if (!http.begin(client, url)) return false;
+    http.addHeader("User-Agent", FLIGHTAWARE_USER_AGENT);
+    http.addHeader("Accept", "text/html,application/xhtml+xml");
+    http.addHeader("Accept-Language", "en-US,en;q=0.9");
+    http.addHeader("Accept-Encoding", "identity");
+    http.addHeader("Cache-Control", "no-cache");
+
+    const int code = http.GET();
+    s_lastFetchStatus = code;
+    if (code != 200) {
+        http.end();
+        return false;
+    }
+
+    String html;
+    html.reserve(4096);
+    WiFiClient *stream = http.getStreamPtr();
+    const uint32_t start = millis();
+    while (http.connected() && html.length() < FLIGHTAWARE_SCRAPE_LIMIT && (millis() - start) < 2500UL) {
+        int avail = stream->available();
+        if (avail <= 0) {
+            delay(10);
+            continue;
+        }
+        while (avail-- > 0 && html.length() < FLIGHTAWARE_SCRAPE_LIMIT) {
+            int ch = stream->read();
+            if (ch < 0) break;
+            html += static_cast<char>(ch);
+        }
+        if (html.indexOf("<meta name=\"origin\"") >= 0 &&
+            html.indexOf("<meta name=\"destination\"") >= 0 &&
+            html.indexOf("flight from ") >= 0) {
+            break;
+        }
+    }
+    http.end();
+    if (html.length() == 0) return false;
+
+    RouteEndpoint faFrom = {}, faTo = {};
+    char desc[128] = "";
+    char originCode[8] = "";
+    char destCode[8] = "";
+    const bool haveDesc = extract_attr_value(html, "<meta property=\"og:description\"", desc, sizeof(desc)) ||
+                          extract_attr_value(html, "<meta name=\"twitter:description\"", desc, sizeof(desc)) ||
+                          extract_between(html, "\"og:description\" content=\"", "\"", desc, sizeof(desc));
+    const bool haveOrigin = extract_attr_value(html, "<meta name=\"origin\"", originCode, sizeof(originCode));
+    const bool haveDest = extract_attr_value(html, "<meta name=\"destination\"", destCode, sizeof(destCode));
+
+    if (haveDesc) parse_flightaware_description(desc, faFrom, faTo);
+    if (haveOrigin) snprintf(faFrom.code, sizeof(faFrom.code), "%s", originCode);
+    if (haveDest)   snprintf(faTo.code, sizeof(faTo.code), "%s", destCode);
+
+    if (!faFrom.label[0] && haveOrigin) code_to_label(originCode, faFrom.label, sizeof(faFrom.label));
+    if (!faTo.label[0] && haveDest)     code_to_label(destCode, faTo.label, sizeof(faTo.label));
+    if (!faFrom.label[0] || !faTo.label[0]) return false;
+
+    format_route_lines(faFrom, faTo, true, false, line1, l1n, line2, l2n);
+    snprintf(s_lastFetchMode, sizeof(s_lastFetchMode), "%s", haveDesc ? "fa-og" : "fa-meta");
+    return true;
 }
 
 static bool is_commercial_callsign(const char *callsign) {
@@ -308,10 +507,10 @@ static void route_learn_put(const char *callsign, const RouteEndpoint &from, con
 }
 
 bool route_fetch(const char *hex, const char *callsign, float targetLat, float targetLon, float targetTrack,
-                 char *from, size_t fn, char *to, size_t tn) {
+                 char *line1, size_t l1n, char *line2, size_t l2n) {
     route_fetch_reset_debug();
-    if (fn) from[0] = 0;
-    if (tn) to[0] = 0;
+    if (l1n) line1[0] = 0;
+    if (l2n) line2[0] = 0;
     if ((!hex || !hex[0]) && (!callsign || !callsign[0])) return false;
     if (WiFi.status() != WL_CONNECTED) return false;
 
@@ -319,6 +518,8 @@ bool route_fetch(const char *hex, const char *callsign, float targetLat, float t
     normalize_token(callsign, cs, sizeof(cs));
     normalize_token(hex, hs, sizeof(hs));
     if (!hs[0] && !cs[0]) return false;
+
+    if (cs[0] && route_fetch_flightaware(cs, line1, l1n, line2, l2n)) return true;
 
     char url[128];
     if (hs[0] && cs[0]) {
@@ -389,11 +590,9 @@ bool route_fetch(const char *hex, const char *callsign, float targetLat, float t
     }
 
     if (bestScore < 1) {
-        snprintf(from, fn, "%s", bestFrom.label);
-        if (bestTo.label[0]) snprintf(to, tn, "%s (old)", bestTo.label);
-        else                 snprintf(to, tn, "%s", "(old)");
+        format_route_lines(bestFrom, bestTo, false, true, line1, l1n, line2, l2n);
         snprintf(s_lastFetchMode, sizeof(s_lastFetchMode), "%s", "adsbdb-weak");
-        return (from[0] || to[0]);
+        return (line1[0] || line2[0]);
     }
 
     if (flipped && strcmp(s_lastFetchMode, "adsbdb-learn") != 0) {
@@ -406,9 +605,8 @@ bool route_fetch(const char *hex, const char *callsign, float targetLat, float t
         route_learn_put(callsign, bestFrom, bestTo, bestScore > 9 ? 9 : bestScore);
     }
 
-    snprintf(from, fn, "%s", bestFrom.label);
-    snprintf(to, tn, "%s", bestTo.label);
-    return (from[0] || to[0]);
+    format_route_lines(bestFrom, bestTo, false, false, line1, l1n, line2, l2n);
+    return (line1[0] || line2[0]);
 }
 
 const char *route_fetch_last_mode() { return s_lastFetchMode; }

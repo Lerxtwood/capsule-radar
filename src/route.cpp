@@ -11,7 +11,7 @@ static std::mutex s_m;
 #define ROUTE_RESULTS 16
 #define ROUTE_QUEUE   16
 struct RouteItem { char key[24], hex[12], call[12]; float lat, lon, track; };
-struct RouteResult { char key[24], from[40], to[40]; uint32_t stamp; uint64_t fetchedMs; };
+struct RouteResult { char key[24], line1[96], line2[96]; uint32_t stamp; uint64_t fetchedMs; };
 static RouteResult s_results[ROUTE_RESULTS] = {};
 static RouteItem s_queue[ROUTE_QUEUE] = {};
 static RouteItem s_priorityItem = {};
@@ -74,9 +74,9 @@ static void queue_request(const char *hex, const char *callsign, float lat, floa
             return;
         }
         s_results[ri].key[0] = 0;
-        s_results[ri].from[0] = 0;
-        s_results[ri].to[0] = 0;
-        s_results[ri].fetchedMs = 0;
+            s_results[ri].line1[0] = 0;
+            s_results[ri].line2[0] = 0;
+            s_results[ri].fetchedMs = 0;
     }
     for (int i = 0; i < s_qCount; ++i) {
         if (strcmp(key, s_queue[i].key) != 0) continue;
@@ -174,7 +174,7 @@ static void ascii_fold(const char *in, char *out, size_t n) {
     out[o] = 0;
 }
 
-void route_store(const char *hex, const char *callsign, const char *from, const char *to) {
+void route_store(const char *hex, const char *callsign, const char *line1, const char *line2) {
     std::lock_guard<std::mutex> g(s_m);
     char key[24] = "";
     route_identity_key(hex, callsign, key, sizeof(key));
@@ -188,8 +188,8 @@ void route_store(const char *hex, const char *callsign, const char *from, const 
         }
     }
     snprintf(s_results[slot].key, sizeof(s_results[slot].key), "%s", key);
-    ascii_fold(from, s_results[slot].from, sizeof(s_results[slot].from));
-    ascii_fold(to,   s_results[slot].to,   sizeof(s_results[slot].to));
+    ascii_fold(line1, s_results[slot].line1, sizeof(s_results[slot].line1));
+    ascii_fold(line2, s_results[slot].line2, sizeof(s_results[slot].line2));
     s_results[slot].stamp = ++s_stamp;
     s_results[slot].fetchedMs = monotonic_ms();
     for (int i = 0; i < s_qCount;) {
@@ -200,7 +200,7 @@ void route_store(const char *hex, const char *callsign, const char *from, const 
     }
 }
 
-bool route_get(const char *hex, const char *callsign, char *from, size_t fn, char *to, size_t tn) {
+bool route_get(const char *hex, const char *callsign, char *line1, size_t l1n, char *line2, size_t l2n) {
     std::lock_guard<std::mutex> g(s_m);
     char key[24] = "";
     route_identity_key(hex, callsign, key, sizeof(key));
@@ -208,13 +208,13 @@ bool route_get(const char *hex, const char *callsign, char *from, size_t fn, cha
     if (i >= 0) {
         if (route_result_expired(s_results[i])) {
             s_results[i].key[0] = 0;
-            s_results[i].from[0] = 0;
-            s_results[i].to[0] = 0;
+            s_results[i].line1[0] = 0;
+            s_results[i].line2[0] = 0;
             s_results[i].fetchedMs = 0;
             return false;
         }
-        snprintf(from, fn, "%s", s_results[i].from);
-        snprintf(to, tn, "%s", s_results[i].to);
+        snprintf(line1, l1n, "%s", s_results[i].line1);
+        snprintf(line2, l2n, "%s", s_results[i].line2);
         s_results[i].stamp = ++s_stamp;
         return true;
     }

@@ -204,25 +204,26 @@ static void adsb_task(void*) {
             char wantHex[12], wantCall[12];
             float wantLat = 0.0f, wantLon = 0.0f, wantTrack = 0.0f / 0.0f;
             if (route_pending(wantHex, sizeof(wantHex), wantCall, sizeof(wantCall), &wantLat, &wantLon, &wantTrack)) {
-                char from[40] = "", to[40] = "";
-                if (route_cache_get(wantHex, wantCall, from, sizeof(from), to, sizeof(to))) {
-                    route_store(wantHex, wantCall, from, to);                       // NVS hit, no network
+                char routeLine1[96] = "", routeLine2[96] = "";
+                if (route_cache_get(wantHex, wantCall, routeLine1, sizeof(routeLine1), routeLine2, sizeof(routeLine2))) {
+                    route_store(wantHex, wantCall, routeLine1, routeLine2);        // NVS hit, no network
                     g_detailDirty = true;
                     Serial.printf("[route] %s / %s (cache): '%s' -> '%s'\n",
                                   wantHex[0] ? wantHex : "-", wantCall[0] ? wantCall : "-",
-                                  from, to);
-                } else if (route_fetch(wantHex, wantCall, wantLat, wantLon, wantTrack, from, sizeof(from), to, sizeof(to))) {
-                    route_store(wantHex, wantCall, from, to);
+                                  routeLine1, routeLine2);
+                } else if (route_fetch(wantHex, wantCall, wantLat, wantLon, wantTrack,
+                                       routeLine1, sizeof(routeLine1), routeLine2, sizeof(routeLine2))) {
+                    route_store(wantHex, wantCall, routeLine1, routeLine2);
                     g_detailDirty = true;
                     if (strcmp(route_fetch_last_mode(), "adsbdb-weak") != 0) {
-                        route_cache_put(wantHex, wantCall, from, to);              // remember across reboots
+                        route_cache_put(wantHex, wantCall, routeLine1, routeLine2); // remember across reboots
                     }
                     Serial.printf("[route] %s / %s (%s %d): '%s' -> '%s'\n",
                                   wantHex[0] ? wantHex : "-", wantCall[0] ? wantCall : "-",
                                   route_fetch_last_mode(), route_fetch_last_status(),
-                                  from, to);
+                                  routeLine1, routeLine2);
                 } else {
-                    route_store(wantHex, wantCall, from, to);   // empty -> don't refetch this session
+                    route_store(wantHex, wantCall, routeLine1, routeLine2);   // empty -> don't refetch this session
                     g_detailDirty = true;
                     Serial.printf("[route] %s / %s (%s %d): no route [%s]\n",
                                   wantHex[0] ? wantHex : "-", wantCall[0] ? wantCall : "-",
@@ -365,10 +366,10 @@ static void updatePrefetchIndicators() {
     if (millis() - lastCheck < 200) return;
     lastCheck = millis();
     for (size_t i = 0; i < g_prefetching.size();) {
-        char from[40], to[40];
+        char routeLine1[96], routeLine2[96];
         const bool routeDone = g_prefetching[i].call.empty() ||
             route_get(g_prefetching[i].hex.c_str(), g_prefetching[i].call.c_str(),
-                      from, sizeof(from), to, sizeof(to));
+                      routeLine1, sizeof(routeLine1), routeLine2, sizeof(routeLine2));
         const bool photoDone = photo_done(g_prefetching[i].hex.c_str());
         const uint32_t elapsed = millis() - g_prefetching[i].startedMs;
         const bool timedOut = elapsed > 60000UL;

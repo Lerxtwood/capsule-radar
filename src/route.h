@@ -9,6 +9,6 @@ void route_prefetch(const char *hex, const char *callsign, float lat, float lon,
 void route_cancel_prefetches();                               // discard queued background requests
 bool route_pending(char *hexOut, size_t hn, char *callOut, size_t cn, float *latOut, float *lonOut, float *trackOut);      // task: is a lookup needed?
 void route_store(const char *hex, const char *callsign,
-                 const char *from, const char *to);          // task/sim: store result
+                 const char *line1, const char *line2);      // task/sim: store formatted two-line result
 bool route_get(const char *hex, const char *callsign,
-               char *from, size_t fn, char *to, size_t tn);  // UI: read result
+               char *line1, size_t l1n, char *line2, size_t l2n);  // UI: read result
