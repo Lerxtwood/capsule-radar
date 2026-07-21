@@ -22,6 +22,7 @@ static lv_obj_t *s_tileRadar = nullptr, *s_tileList = nullptr, *s_tileStats = nu
 static lv_obj_t *s_card = nullptr, *s_cardTitle = nullptr, *s_cardL = nullptr, *s_cardR = nullptr;
 static lv_obj_t *s_cardRoute = nullptr;
 static lv_obj_t *s_photo = nullptr, *s_photoCredit = nullptr;   // aircraft photo above the card
+static lv_obj_t *s_photoZoomScrim = nullptr, *s_photoZoom = nullptr;
 static lv_timer_t *s_previewTimer = nullptr;
 static bool s_autoPreview = false;
 static char s_lastRouteReq[24] = "";
@@ -37,6 +38,10 @@ static constexpr lv_coord_t CARD_W = 300;
 static constexpr lv_coord_t CARD_BASE_H = 118;
 static constexpr lv_coord_t CARD_ROUTE_Y = 74;
 static constexpr lv_coord_t CARD_ROUTE_W = 276;
+static bool s_photoZoomShown = false;
+static char s_pendingPhotoZoomHex[10] = "";
+
+static void refresh_card(void);
 
 // --------------------------------------------------------------------- units
 // 0 = Aviation (ft, kt, km) · 1 = Metric (m, km/h, km) · 2 = Imperial (ft, mph, mi).
@@ -109,10 +114,59 @@ static void fold_ascii(char *s) {
     *o = 0;
 }
 
+static void hide_photo_zoom() {
+    s_photoZoomShown = false;
+    s_pendingPhotoZoomHex[0] = 0;
+    if (s_photoZoomScrim) lv_obj_add_flag(s_photoZoomScrim, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void show_photo_zoom(const char *hex) {
+    if (!hex || !hex[0] || !s_photoZoom || !s_photoZoomScrim) return;
+    int pw = 0, ph = 0;
+    if (!photo_full_get(hex, &pw, &ph, nullptr, 0) || pw <= 0 || ph <= 0) return;
+    lv_color_t *pbuf = photo_full_pixels(hex);
+    if (!pbuf) return;
+    lv_canvas_set_buffer(s_photoZoom, pbuf, pw, ph, LV_IMG_CF_TRUE_COLOR);
+    lv_obj_set_size(s_photoZoom, pw, ph);
+    lv_obj_center(s_photoZoom);
+    lv_obj_clear_flag(s_photoZoomScrim, LV_OBJ_FLAG_HIDDEN);
+    lv_obj_move_foreground(s_photoZoomScrim);
+    lv_obj_invalidate(s_photoZoom);
+    s_photoZoomShown = true;
+}
+
+static void photo_zoom_bg_cb(lv_event_t *e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    hide_photo_zoom();
+    radar::select(-1);
+    refresh_card();
+    lv_event_stop_bubbling(e);
+}
+
+static void photo_zoom_image_cb(lv_event_t *e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    hide_photo_zoom();
+    lv_event_stop_bubbling(e);
+}
+
+static void photo_thumb_cb(lv_event_t *e) {
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+    AcInfo in;
+    if (!radar::selected(in) || !in.hex[0]) return;
+    if (photo_full_get(in.hex, nullptr, nullptr, nullptr, 0)) {
+        show_photo_zoom(in.hex);
+    } else {
+        snprintf(s_pendingPhotoZoomHex, sizeof(s_pendingPhotoZoomHex), "%s", in.hex);
+        photo_request(in.hex, in.type);
+    }
+    lv_event_stop_bubbling(e);
+}
+
 // ----------------------------------------------------------------- detail card
 static void refresh_card(void) {
     AcInfo in;
     if (!radar::selected(in)) {
+        hide_photo_zoom();
         if (s_lastDetailLookupHex[0]) {
             radar::setDetailLookup(s_lastDetailLookupHex, false);
             s_lastDetailLookupHex[0] = 0;
@@ -210,6 +264,12 @@ static void refresh_card(void) {
             lv_obj_align(s_photoCredit, LV_ALIGN_CENTER, 0, -104);   // where the photo would sit
             lv_obj_clear_flag(s_photoCredit, LV_OBJ_FLAG_HIDDEN);
         }
+    }
+    if (s_pendingPhotoZoomHex[0] && strcmp(in.hex, s_pendingPhotoZoomHex) == 0 &&
+        photo_full_get(in.hex, nullptr, nullptr, nullptr, 0)) {
+        show_photo_zoom(in.hex);
+    } else if (s_photoZoomShown && strcmp(in.hex, s_lastDetailLookupHex) != 0) {
+        hide_photo_zoom();
     }
     const bool detailBusy = in.hex[0] && ((!routeReady && in.call[0]) || !photoReady);
     radar::setDetailLookup(in.hex, detailBusy);
@@ -354,6 +414,7 @@ static void radar_longpress_cb(lv_event_t *e) {   // long-press cycles the visua
 
 static void radar_clicked_cb(lv_event_t *e) {
     (void)e;
+    if (s_photoZoomShown) return;
     if (s_longPressed) { s_longPressed = false; s_topTap = false; return; }   // ignore the click after a long-press
     s_autoPreview = false;                                  // manual selection owns the card now
     lv_indev_t *indev = lv_indev_get_act();
@@ -608,6 +669,9 @@ static void build_card(void) {
     lv_obj_set_style_border_color(s_photo, UI_GREEN, 0);
     lv_obj_set_style_border_opa(s_photo, 170, 0);
     lv_obj_set_style_border_width(s_photo, 1, 0);
+    lv_obj_add_flag(s_photo, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_photo, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_photo, photo_thumb_cb, LV_EVENT_CLICKED, nullptr);
     lv_obj_add_flag(s_photo, LV_OBJ_FLAG_HIDDEN);
 
     s_photoCredit = lv_label_create(s_tileRadar);
@@ -615,6 +679,27 @@ static void build_card(void) {
     lv_obj_set_style_text_color(s_photoCredit, UI_DIM, 0);
     lv_label_set_text(s_photoCredit, "");
     lv_obj_add_flag(s_photoCredit, LV_OBJ_FLAG_HIDDEN);
+
+    s_photoZoomScrim = lv_obj_create(s_tileRadar);
+    lv_obj_remove_style_all(s_photoZoomScrim);
+    lv_obj_set_size(s_photoZoomScrim, SCREEN_W, SCREEN_H);
+    lv_obj_center(s_photoZoomScrim);
+    lv_obj_set_style_bg_color(s_photoZoomScrim, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_photoZoomScrim, LV_OPA_80, 0);
+    lv_obj_add_flag(s_photoZoomScrim, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_photoZoomScrim, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_photoZoomScrim, photo_zoom_bg_cb, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_flag(s_photoZoomScrim, LV_OBJ_FLAG_HIDDEN);
+
+    s_photoZoom = lv_canvas_create(s_photoZoomScrim);
+    lv_obj_set_style_radius(s_photoZoom, 10, 0);
+    lv_obj_set_style_clip_corner(s_photoZoom, true, 0);
+    lv_obj_set_style_border_color(s_photoZoom, UI_GREEN, 0);
+    lv_obj_set_style_border_opa(s_photoZoom, 210, 0);
+    lv_obj_set_style_border_width(s_photoZoom, 1, 0);
+    lv_obj_add_flag(s_photoZoom, LV_OBJ_FLAG_CLICKABLE);
+    lv_obj_clear_flag(s_photoZoom, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_add_event_cb(s_photoZoom, photo_zoom_image_cb, LV_EVENT_CLICKED, nullptr);
 }
 
 void ui_show_view(int idx) {

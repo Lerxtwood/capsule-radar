@@ -10,23 +10,40 @@
 
 #define PH_MAXW 232
 #define PH_MAXH 156
+#define PH_FULLW 420
+#define PH_FULLH 316
 #define PH_SLOTS 6
 #define PH_QUEUE 12
 
 struct PhotoSlot {
     lv_color_t *buf;
+    lv_color_t *fullBuf;
     char hex[10], type[8], credit[72];
-    int w, h;
-    bool done, ready;
+    char fullCredit[72];
+    int w, h, fullW, fullH;
+    bool done, ready, fullReady;
     uint32_t stamp, failedAtMs;
 };
 static std::mutex s_m;
 static PhotoSlot s_slots[PH_SLOTS] = {};
-struct PhotoRequest { char hex[10], type[8]; };
+struct PhotoRequest {
+    char hex[10], type[8];
+    bool needFull;
+    bool refreshThumb;
+};
 static PhotoRequest s_queue[PH_QUEUE] = {};
 static char s_priorityHex[10] = "";
 static int s_qCount = 0, s_loading = -1;
 static uint32_t s_stamp = 0;
+static bool s_loadingPriority = false;
+static bool s_loadingRefreshThumb = true;
+static int find_slot(const char *hex);
+
+static bool full_ready_for(const char *hex) {
+    const int i = hex ? find_slot(hex) : -1;
+    return i >= 0 && s_slots[i].fullBuf && s_slots[i].fullReady &&
+           s_slots[i].fullW > 0 && s_slots[i].fullH > 0;
+}
 
 static void ascii_fold_text(const char *in, char *out, size_t n) {
     size_t o = 0;
@@ -83,13 +100,26 @@ static lv_color_t *ensure_buf(int slot) {
     return s_slots[slot].buf;
 }
 
+static lv_color_t *ensure_full_buf(int slot) {
+    if (slot < 0 || slot >= PH_SLOTS) return nullptr;
+    if (!s_slots[slot].fullBuf) {
+        const size_t sz = (size_t)PH_FULLW * PH_FULLH * sizeof(lv_color_t);
+#if defined(ESP_PLATFORM)
+        s_slots[slot].fullBuf = (lv_color_t *)heap_caps_malloc(sz, MALLOC_CAP_SPIRAM);
+#else
+        s_slots[slot].fullBuf = (lv_color_t *)malloc(sz);
+#endif
+    }
+    return s_slots[slot].fullBuf;
+}
+
 static int find_slot(const char *hex) {
     for (int i = 0; i < PH_SLOTS; ++i)
         if (s_slots[i].hex[0] && strcmp(hex, s_slots[i].hex) == 0) return i;
     return -1;
 }
 
-static void queue_request(const char *hex, const char *type, bool priority) {
+static void queue_request(const char *hex, const char *type, bool priority, bool needFull) {
     if (!hex || !hex[0]) return;
     std::lock_guard<std::mutex> g(s_m);
     if (priority) snprintf(s_priorityHex, sizeof(s_priorityHex), "%s", hex);
@@ -101,13 +131,21 @@ static void queue_request(const char *hex, const char *type, bool priority) {
             (lv_tick_get() - s_slots[si].failedAtMs >= 15000U);
         if (learnedType || retryDue) {
             s_slots[si].hex[0] = s_slots[si].type[0] = s_slots[si].credit[0] = 0;
+            s_slots[si].fullCredit[0] = 0;
+            s_slots[si].w = s_slots[si].h = s_slots[si].fullW = s_slots[si].fullH = 0;
             s_slots[si].done = s_slots[si].ready = false;
-        } else { s_slots[si].stamp = ++s_stamp; return; }
+            s_slots[si].fullReady = false;
+        } else if (s_slots[si].ready && (!needFull || full_ready_for(hex))) {
+            s_slots[si].stamp = ++s_stamp;
+            return;
+        }
     }
     if (s_loading >= 0 && strcmp(hex, s_slots[s_loading].hex) == 0) return;
     for (int i = 0; i < s_qCount; ++i) {
         if (strcmp(hex, s_queue[i].hex) != 0) continue;
         if (type && type[0]) snprintf(s_queue[i].type, sizeof(s_queue[i].type), "%s", type);
+        if (needFull) s_queue[i].needFull = true;
+        if (si < 0 || !s_slots[si].ready) s_queue[i].refreshThumb = true;
         if (priority && i > 0) {
             PhotoRequest tmp = s_queue[i];
             for (int j = i; j > 0; --j) s_queue[j] = s_queue[j - 1];
@@ -120,14 +158,19 @@ static void queue_request(const char *hex, const char *type, bool priority) {
         for (int i = s_qCount - 1; i > 0; --i) s_queue[i] = s_queue[i - 1];
         snprintf(s_queue[0].hex, sizeof(s_queue[0].hex), "%s", hex);
         snprintf(s_queue[0].type, sizeof(s_queue[0].type), "%s", type ? type : "");
+        s_queue[0].needFull = needFull;
+        s_queue[0].refreshThumb = (si < 0 || !s_slots[si].ready);
     } else if (s_qCount < PH_QUEUE) {
         snprintf(s_queue[s_qCount].hex, sizeof(s_queue[0].hex), "%s", hex);
         snprintf(s_queue[s_qCount].type, sizeof(s_queue[0].type), "%s", type ? type : "");
+        s_queue[s_qCount].needFull = needFull;
+        s_queue[s_qCount].refreshThumb = true;
         ++s_qCount;
     }
 }
-void photo_request(const char *hex, const char *type) { queue_request(hex, type, true); }
-void photo_prefetch(const char *hex, const char *type) { queue_request(hex, type, false); }
+void photo_request(const char *hex, const char *type) { queue_request(hex, type, true, true); }
+void photo_request_zoom(const char *hex, const char *type) { queue_request(hex, type, true, true); }
+void photo_prefetch(const char *hex, const char *type) { queue_request(hex, type, false, false); }
 void photo_cancel_prefetches() {
     std::lock_guard<std::mutex> g(s_m);
     int keep = -1;
@@ -146,8 +189,10 @@ void photo_reset_fallback_cache() {
         const bool generic = strncmp(s_slots[i].credit, "Generic ", 8) == 0;
         if (!generic && (!s_slots[i].done || s_slots[i].ready)) continue;
         s_slots[i].hex[0] = s_slots[i].type[0] = s_slots[i].credit[0] = 0;
-        s_slots[i].w = s_slots[i].h = 0;
+        s_slots[i].fullCredit[0] = 0;
+        s_slots[i].w = s_slots[i].h = s_slots[i].fullW = s_slots[i].fullH = 0;
         s_slots[i].done = s_slots[i].ready = false;
+        s_slots[i].fullReady = false;
         s_slots[i].failedAtMs = 0;
     }
 }
@@ -159,22 +204,32 @@ bool photo_pending(char *o, size_t n, char *typeOut, size_t typeN) {
     for (int i = 0; i + 1 < s_qCount; ++i) s_queue[i] = s_queue[i + 1];
     --s_qCount;
 
-    int slot = -1;
-    for (int i = 0; i < PH_SLOTS; ++i) if (!s_slots[i].hex[0]) { slot = i; break; }
+    int slot = (!req.refreshThumb) ? find_slot(req.hex) : -1;
     if (slot < 0) {
-        for (int i = 0; i < PH_SLOTS; ++i) {
-            if (strcmp(s_slots[i].hex, s_priorityHex) == 0) continue;
-            if (slot < 0 || s_slots[i].stamp < s_slots[slot].stamp) slot = i;
+        for (int i = 0; i < PH_SLOTS; ++i) if (!s_slots[i].hex[0]) { slot = i; break; }
+        if (slot < 0) {
+            for (int i = 0; i < PH_SLOTS; ++i) {
+                if (strcmp(s_slots[i].hex, s_priorityHex) == 0) continue;
+                if (slot < 0 || s_slots[i].stamp < s_slots[slot].stamp) slot = i;
+            }
+            if (slot < 0) slot = 0;
         }
-        if (slot < 0) slot = 0;
     }
-    snprintf(s_slots[slot].hex, sizeof(s_slots[slot].hex), "%s", req.hex);
-    snprintf(s_slots[slot].type, sizeof(s_slots[slot].type), "%s", req.type);
-    s_slots[slot].credit[0] = 0;
-    s_slots[slot].w = s_slots[slot].h = 0;
-    s_slots[slot].done = s_slots[slot].ready = false;
+    if (req.refreshThumb) {
+        snprintf(s_slots[slot].hex, sizeof(s_slots[slot].hex), "%s", req.hex);
+        snprintf(s_slots[slot].type, sizeof(s_slots[slot].type), "%s", req.type);
+        s_slots[slot].credit[0] = 0;
+        s_slots[slot].fullCredit[0] = 0;
+        s_slots[slot].w = s_slots[slot].h = s_slots[slot].fullW = s_slots[slot].fullH = 0;
+        s_slots[slot].done = s_slots[slot].ready = false;
+        s_slots[slot].fullReady = false;
+    } else if (req.type[0]) {
+        snprintf(s_slots[slot].type, sizeof(s_slots[slot].type), "%s", req.type);
+    }
     s_slots[slot].stamp = ++s_stamp;
     s_loading = slot;
+    s_loadingPriority = req.needFull;
+    s_loadingRefreshThumb = req.refreshThumb;
     snprintf(o, n, "%s", req.hex);
     if (typeOut && typeN) snprintf(typeOut, typeN, "%s", req.type);
     return true;
@@ -185,6 +240,11 @@ lv_color_t *photo_buffer(int *mw, int *mh) {
     if (mw) *mw = PH_MAXW;
     if (mh) *mh = PH_MAXH;
     return ensure_buf(s_loading);
+}
+
+bool photo_loading_refresh_thumb() {
+    std::lock_guard<std::mutex> g(s_m);
+    return s_loading >= 0 && s_loadingRefreshThumb;
 }
 
 lv_color_t *photo_pixels(const char *hex) {
@@ -234,6 +294,15 @@ void photo_commit(int w, int h, const char *hex, const char *credit) {
         s_slots[i].stamp = ++s_stamp;
     }
     s_loading = -1;
+    s_loadingPriority = false;
+    s_loadingRefreshThumb = true;
+}
+
+void photo_finish_without_thumb() {
+    std::lock_guard<std::mutex> g(s_m);
+    s_loading = -1;
+    s_loadingPriority = false;
+    s_loadingRefreshThumb = true;
 }
 
 bool photo_get(const char *hex, int *w, int *h, char *credit, size_t cn) {
@@ -253,4 +322,45 @@ bool photo_done(const char *hex) {
     std::lock_guard<std::mutex> g(s_m);
     const int i = hex ? find_slot(hex) : -1;
     return i >= 0 && s_slots[i].done;   // committed (photo or not)
+}
+
+lv_color_t *photo_full_buffer(int *maxW, int *maxH) {
+    std::lock_guard<std::mutex> g(s_m);
+    if (maxW) *maxW = PH_FULLW;
+    if (maxH) *maxH = PH_FULLH;
+    if (!s_loadingPriority) return nullptr;
+    return ensure_full_buf(s_loading);
+}
+
+void photo_full_commit(int w, int h, const char *hex, const char *credit) {
+    std::lock_guard<std::mutex> g(s_m);
+    if (!hex || !hex[0] || !s_loadingPriority || s_loading < 0) {
+        return;
+    }
+    const int i = (strcmp(hex, s_slots[s_loading].hex) == 0) ? s_loading : find_slot(hex);
+    if (i < 0) return;
+    ascii_fold_text(credit ? credit : "", s_slots[i].fullCredit, sizeof(s_slots[i].fullCredit));
+    s_slots[i].fullW = w;
+    s_slots[i].fullH = h;
+    s_slots[i].fullReady = (w > 0 && h > 0 && s_slots[i].fullBuf);
+    s_slots[i].stamp = ++s_stamp;
+}
+
+lv_color_t *photo_full_pixels(const char *hex) {
+    std::lock_guard<std::mutex> g(s_m);
+    const int i = hex ? find_slot(hex) : -1;
+    if (i < 0 || !s_slots[i].fullBuf || !s_slots[i].fullReady || s_slots[i].fullW <= 0 || s_slots[i].fullH <= 0) return nullptr;
+    s_slots[i].stamp = ++s_stamp;
+    return s_slots[i].fullBuf;
+}
+
+bool photo_full_get(const char *hex, int *w, int *h, char *credit, size_t cn) {
+    std::lock_guard<std::mutex> g(s_m);
+    const int i = hex ? find_slot(hex) : -1;
+    if (i < 0 || !s_slots[i].fullBuf || !s_slots[i].fullReady || s_slots[i].fullW <= 0 || s_slots[i].fullH <= 0) return false;
+    if (w) *w = s_slots[i].fullW;
+    if (h) *h = s_slots[i].fullH;
+    if (credit) snprintf(credit, cn, "%s", s_slots[i].fullCredit);
+    s_slots[i].stamp = ++s_stamp;
+    return true;
 }

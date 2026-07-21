@@ -15,6 +15,9 @@
 
 #define PS_UA "CapsuleRadar/1.0 (+https://github.com/socquique/capsule-radar)"
 
+extern const uint8_t assets_wright_placeholder_jpg_start[] asm("_binary_assets_wright_placeholder_jpg_start");
+extern const uint8_t assets_wright_placeholder_jpg_end[] asm("_binary_assets_wright_placeholder_jpg_end");
+
 // JPEG decode target (set just before drawJpg)
 static lv_color_t *s_dst = nullptr;
 static int s_dstW = 0, s_dstH = 0;
@@ -29,6 +32,69 @@ static bool jpg_out(int16_t x, int16_t y, uint16_t w, uint16_t h, uint16_t *bmp)
             s_dst[yy * s_dstW + xx].full = bmp[j * w + i];   // RGB565 -> lv_color_t
         }
     }
+    return true;
+}
+
+static void scale_rgb565(const lv_color_t *src, int sw, int sh,
+                         lv_color_t *dst, int dw, int dh);
+
+static bool use_bundled_placeholder(const char *hex, const char *label) {
+    const size_t jpgLen = (size_t)(assets_wright_placeholder_jpg_end - assets_wright_placeholder_jpg_start);
+    if (!assets_wright_placeholder_jpg_start || jpgLen == 0) return false;
+
+    const bool refreshThumb = photo_loading_refresh_thumb();
+    int thumbMaxW = 232, thumbMaxH = 156;
+    if (refreshThumb) photo_buffer(&thumbMaxW, &thumbMaxH);
+    int fullMaxW = 0, fullMaxH = 0;
+    lv_color_t *fullDst = photo_full_buffer(&fullMaxW, &fullMaxH);
+    if (!fullDst) { fullMaxW = thumbMaxW; fullMaxH = thumbMaxH; }
+
+    int maxW = fullMaxW, maxH = fullMaxH;
+    lv_color_t *dst = fullDst;
+    if (!dst) dst = photo_buffer(&maxW, &maxH);
+    if (!dst) return false;
+
+    uint16_t jw = 0, jh = 0;
+    if (TJpgDec.getJpgSize(&jw, &jh, assets_wright_placeholder_jpg_start, jpgLen) != JDR_OK || jw == 0 || jh == 0) {
+        return false;
+    }
+
+    uint8_t scale = 1;
+    while ((jw / scale) > (uint16_t)maxW || (jh / scale) > (uint16_t)maxH) { scale <<= 1; if (scale >= 8) break; }
+    s_dstW = (int)(jw / scale); if (s_dstW > maxW) s_dstW = maxW;
+    s_dstH = (int)(jh / scale); if (s_dstH > maxH) s_dstH = maxH;
+    s_dst = dst;
+    for (int i = 0; i < s_dstW * s_dstH; ++i) s_dst[i].full = 0;
+
+    TJpgDec.setJpgScale(scale);
+    TJpgDec.setSwapBytes(false);
+    TJpgDec.setCallback(jpg_out);
+    if (TJpgDec.drawJpg(0, 0, assets_wright_placeholder_jpg_start, jpgLen) != JDR_OK) return false;
+
+    const int decodedW = s_dstW;
+    const int decodedH = s_dstH;
+    if (fullDst) photo_full_commit(decodedW, decodedH, hex, label);
+    if (!refreshThumb) {
+        photo_finish_without_thumb();
+        Serial.printf("[photo] %s: using bundled Wright Flyer placeholder\n", hex ? hex : "-");
+        return true;
+    }
+
+    int thumbW = thumbMaxW;
+    int thumbH = thumbMaxH;
+    if (decodedW > 0 && decodedH > 0) {
+        if ((decodedW * thumbMaxH) > (decodedH * thumbMaxW)) thumbH = (decodedH * thumbMaxW) / decodedW;
+        else                                                  thumbW = (decodedW * thumbMaxH) / decodedH;
+        if (thumbW < 1) thumbW = 1;
+        if (thumbH < 1) thumbH = 1;
+    }
+    lv_color_t *thumbDst = photo_buffer(&thumbMaxW, &thumbMaxH);
+    if (thumbDst && thumbDst != dst) {
+        for (int i = 0; i < thumbMaxW * thumbMaxH; ++i) thumbDst[i].full = 0;
+        scale_rgb565(dst, decodedW, decodedH, thumbDst, thumbW, thumbH);
+    }
+    photo_commit(thumbW, thumbH, hex, label);
+    Serial.printf("[photo] %s: using bundled Wright Flyer placeholder\n", hex ? hex : "-");
     return true;
 }
 
@@ -163,15 +229,28 @@ static bool generic_photo_lookup(const char *type, char *imgUrl, size_t un,
     return true;
 }
 
+static void scale_rgb565(const lv_color_t *src, int sw, int sh,
+                         lv_color_t *dst, int dw, int dh) {
+    if (!src || !dst || sw <= 0 || sh <= 0 || dw <= 0 || dh <= 0) return;
+    for (int y = 0; y < dh; ++y) {
+        const int sy = (y * sh) / dh;
+        for (int x = 0; x < dw; ++x) {
+            const int sx = (x * sw) / dw;
+            dst[y * dw + x] = src[sy * sw + sx];
+        }
+    }
+}
+
 bool photo_fetch(const char *hex, const char *type) {
-    if (!hex || !hex[0] || WiFi.status() != WL_CONNECTED) { photo_commit(0, 0, hex, ""); return false; }
+    if (!hex || !hex[0]) return false;
+    const bool refreshThumb = photo_loading_refresh_thumb();
+    if (WiFi.status() != WL_CONNECTED) return use_bundled_placeholder(hex, "Wright Flyer placeholder");
 
     // Memory guard: a photo fetch needs a TLS handshake + JPEG decode. If the largest
     // contiguous internal block is tight, skip it (degrade gracefully, never crash).
     if (heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL) < 28000) {
         Serial.println("[photo] low memory, skipping");
-        photo_commit(0, 0, hex, "");
-        return false;
+        return use_bundled_placeholder(hex, "Wright Flyer placeholder");
     }
 
     // 1) planespotters lookup (JSON)
@@ -200,39 +279,45 @@ bool photo_fetch(const char *hex, const char *type) {
     }
     if (!imgUrl[0]) usedGeneric = generic_photo_lookup(type, imgUrl, sizeof(imgUrl), credit, sizeof(credit));
     if (!imgUrl[0]) {
-        Serial.printf("[photo] %s: no photo available\n", hex);
-        photo_commit(0, 0, hex, ""); return false;
+        Serial.printf("[photo] %s: no photo available, using placeholder\n", hex);
+        return use_bundled_placeholder(hex, "Wright Flyer placeholder");
     }
 
-    // 2) download the JPEG thumbnail.
+    // 2) download a JPEG large enough for the zoomed view; the thumbnail is derived
+    // from that decoded image so the expanded photo is not just a stretched thumbnail.
     // planespotters serves *progressive* JPEGs, which TJpgDec cannot decode. Route the
     // image through the weserv.nl image proxy, which re-encodes to baseline JPEG and
     // resizes to our canvas width — the result is small (~5 KB) and decodable.
     const char *bare = imgUrl;
     if      (strncmp(bare, "https://", 8) == 0) bare += 8;
     else if (strncmp(bare, "http://",  7) == 0) bare += 7;
-    int canvasW = 232, canvasH = 156;
-    photo_buffer(&canvasW, &canvasH);                 // resize to fit the canvas (preserve aspect)
+    int thumbMaxW = 232, thumbMaxH = 156;
+    if (refreshThumb) photo_buffer(&thumbMaxW, &thumbMaxH);
+    int fullMaxW = 0, fullMaxH = 0;
+    lv_color_t *fullDst = photo_full_buffer(&fullMaxW, &fullMaxH);
+    if (!fullDst) { fullMaxW = thumbMaxW; fullMaxH = thumbMaxH; }
     char proxUrl[768];
     snprintf(proxUrl, sizeof(proxUrl),
-             "https://images.weserv.nl/?url=%s&w=%d&h=%d&fit=inside&output=jpg", bare, canvasW, canvasH);
+             "https://images.weserv.nl/?url=%s&w=%d&h=%d&fit=inside&output=jpg", bare, fullMaxW, fullMaxH);
 
     uint8_t *img = nullptr; size_t ilen = 0;
     if (!http_get(proxUrl, &img, &ilen, 65536)) {
         delay(usedGeneric ? 1000 : 150);
         if (!http_get(proxUrl, &img, &ilen, 65536)) {
             Serial.printf("[photo] %s: %s image download failed\n", hex, usedGeneric ? "generic" : "exact");
-            photo_commit(0, 0, hex, ""); return false;
+            return use_bundled_placeholder(hex, "Wright Flyer placeholder");
         }
     }
 
     // 3) decode into the shared PSRAM buffer, scaled to fit
-    int maxW = 0, maxH = 0;
-    lv_color_t *dst = photo_buffer(&maxW, &maxH);
+    int maxW = fullMaxW, maxH = fullMaxH;
+    lv_color_t *dst = fullDst;
+    if (!dst) dst = photo_buffer(&maxW, &maxH);
     uint16_t jw = 0, jh = 0;
     if (TJpgDec.getJpgSize(&jw, &jh, img, ilen) != JDR_OK || jw == 0 || jh == 0) {
         Serial.printf("[photo] %s: getJpgSize failed\n", hex);
-        heap_caps_free(img); photo_commit(0, 0, hex, ""); return false;
+        heap_caps_free(img);
+        return use_bundled_placeholder(hex, "Wright Flyer placeholder");
     }
     uint8_t scale = 1;
     while ((jw / scale) > (uint16_t)maxW || (jh / scale) > (uint16_t)maxH) { scale <<= 1; if (scale >= 8) break; }
@@ -247,8 +332,34 @@ bool photo_fetch(const char *hex, const char *type) {
     const JRESULT jr = TJpgDec.drawJpg(0, 0, img, ilen);
     heap_caps_free(img);
 
-    if (jr != JDR_OK) { photo_commit(0, 0, hex, ""); return false; }
-    photo_commit(s_dstW, s_dstH, hex, credit);
-    Serial.printf("[photo] %s: %dx%d (scale 1/%d) by %s\n", hex, s_dstW, s_dstH, scale, credit);
+    if (jr != JDR_OK) return use_bundled_placeholder(hex, "Wright Flyer placeholder");
+    const int decodedW = s_dstW;
+    const int decodedH = s_dstH;
+    if (fullDst) photo_full_commit(decodedW, decodedH, hex, credit);
+    if (!refreshThumb) {
+        photo_finish_without_thumb();
+        Serial.printf("[photo] %s: cached full %dx%d (scale 1/%d) by %s\n",
+                      hex, decodedW, decodedH, scale, credit);
+        return true;
+    }
+
+    int thumbW = thumbMaxW;
+    int thumbH = thumbMaxH;
+    if (decodedW > 0 && decodedH > 0) {
+        if ((decodedW * thumbMaxH) > (decodedH * thumbMaxW)) thumbH = (decodedH * thumbMaxW) / decodedW;
+        else                                                  thumbW = (decodedW * thumbMaxH) / decodedH;
+        if (thumbW < 1) thumbW = 1;
+        if (thumbH < 1) thumbH = 1;
+    }
+    lv_color_t *thumbDst = photo_buffer(&thumbMaxW, &thumbMaxH);
+    if (thumbDst && thumbDst == dst && thumbW == decodedW && thumbH == decodedH) {
+        // Already decoded directly into the thumbnail-sized slot buffer.
+    } else if (thumbDst) {
+        for (int i = 0; i < thumbMaxW * thumbMaxH; ++i) thumbDst[i].full = 0;
+        scale_rgb565(dst, decodedW, decodedH, thumbDst, thumbW, thumbH);
+    }
+    photo_commit(thumbW, thumbH, hex, credit);
+    Serial.printf("[photo] %s: thumb %dx%d full %dx%d (scale 1/%d) by %s\n",
+                  hex, thumbW, thumbH, decodedW, decodedH, scale, credit);
     return true;
 }
