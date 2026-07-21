@@ -15,11 +15,17 @@ public:
     bool poll(std::vector<Aircraft>& out);
 
     uint32_t lastOkMs() const { return _lastOkMs; }
+    bool cooldownActive() const;
+    uint32_t cooldownRemainingMs() const;
 
 private:
     bool fetchFrom(const char* host, std::vector<Aircraft>& out);   // one host, one attempt
+    bool hostCooldownActive(uint32_t untilMs) const;
+    uint32_t hostCooldownRemainingMs(uint32_t untilMs) const;
 
     double _lat = 0, _lon = 0;
     float  _rangeKm = 15.0f;
     uint32_t _lastOkMs = 0;
+    uint32_t _primaryCooldownUntilMs = 0;
+    uint32_t _fallbackCooldownUntilMs = 0;
 };

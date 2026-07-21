@@ -28,6 +28,48 @@ static char s_priorityHex[10] = "";
 static int s_qCount = 0, s_loading = -1;
 static uint32_t s_stamp = 0;
 
+static void ascii_fold_text(const char *in, char *out, size_t n) {
+    size_t o = 0;
+    for (size_t i = 0; in && in[i] && o + 1 < n;) {
+        const unsigned char c = (unsigned char)in[i];
+        if (c < 0x80) { out[o++] = in[i++]; continue; }
+        if (c == 0xC3 && in[i + 1]) {
+            const unsigned char d = (unsigned char)in[i + 1];
+            char r;
+            if      (d >= 0x80 && d <= 0x85) r = 'A';
+            else if (d >= 0xA0 && d <= 0xA5) r = 'a';
+            else if (d == 0x87)              r = 'C';
+            else if (d == 0xA7)              r = 'c';
+            else if (d >= 0x88 && d <= 0x8B) r = 'E';
+            else if (d >= 0xA8 && d <= 0xAB) r = 'e';
+            else if (d >= 0x8C && d <= 0x8F) r = 'I';
+            else if (d >= 0xAC && d <= 0xAF) r = 'i';
+            else if (d == 0x91)              r = 'N';
+            else if (d == 0xB1)              r = 'n';
+            else if (d >= 0x92 && d <= 0x96) r = 'O';
+            else if (d >= 0xB2 && d <= 0xB6) r = 'o';
+            else if (d >= 0x99 && d <= 0x9C) r = 'U';
+            else if (d >= 0xB9 && d <= 0xBC) r = 'u';
+            else if (d == 0x9F)              r = 's';
+            else                             r = '?';
+            out[o++] = r;
+            i += 2;
+            continue;
+        }
+        switch (c) {
+            case 0xC4: case 0xE4: out[o++] = 'a'; break;
+            case 0xD6: case 0xF6: out[o++] = 'o'; break;
+            case 0xDC: case 0xFC: out[o++] = 'u'; break;
+            case 0xC9: case 0xE9:
+            case 0xC8: case 0xE8: out[o++] = 'e'; break;
+            case 0xD1: case 0xF1: out[o++] = 'n'; break;
+            default: out[o++] = '?'; break;
+        }
+        ++i;
+    }
+    out[o] = 0;
+}
+
 static lv_color_t *ensure_buf(int slot) {
     if (slot < 0 || slot >= PH_SLOTS) return nullptr;
     if (!s_slots[slot].buf) {
@@ -184,7 +226,7 @@ void photo_commit(int w, int h, const char *hex, const char *credit) {
     int i = (s_loading >= 0 && hex && strcmp(hex, s_slots[s_loading].hex) == 0)
                 ? s_loading : (hex ? find_slot(hex) : -1);
     if (i >= 0) {
-        snprintf(s_slots[i].credit, sizeof(s_slots[i].credit), "%s", credit ? credit : "");
+        ascii_fold_text(credit ? credit : "", s_slots[i].credit, sizeof(s_slots[i].credit));
         s_slots[i].w = w; s_slots[i].h = h;
         s_slots[i].ready = (w > 0 && h > 0 && s_slots[i].buf);
         s_slots[i].done = true;

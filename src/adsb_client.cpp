@@ -13,6 +13,8 @@
 #include <ArduinoJson.h>   // v7
 #include <esp_heap_caps.h>
 
+static constexpr uint32_t ADSB_RATE_LIMIT_BACKOFF_MS = 60000UL;
+
 // Parse the JSON in PSRAM, not internal RAM. Otherwise the per-poll JSON alloc/free
 // churn fragments the internal heap and, after a while, mbedTLS can't find a large
 // enough contiguous block for the TLS handshake (-32512), freezing the feed.
@@ -27,14 +29,41 @@ void AdsbClient::begin(double homeLat, double homeLon, float rangeKm) {
     _lat = homeLat; _lon = homeLon; _rangeKm = rangeKm;
 }
 
+bool AdsbClient::cooldownActive() const {
+    return hostCooldownActive(_primaryCooldownUntilMs) || hostCooldownActive(_fallbackCooldownUntilMs);
+}
+
+uint32_t AdsbClient::cooldownRemainingMs() const {
+    const uint32_t primary = hostCooldownRemainingMs(_primaryCooldownUntilMs);
+    const uint32_t fallback = hostCooldownRemainingMs(_fallbackCooldownUntilMs);
+    if (!primary) return fallback;
+    if (!fallback) return primary;
+    return primary < fallback ? primary : fallback;
+}
+
+bool AdsbClient::hostCooldownActive(uint32_t untilMs) const {
+    return untilMs && (int32_t)(millis() - untilMs) < 0;
+}
+
+uint32_t AdsbClient::hostCooldownRemainingMs(uint32_t untilMs) const {
+    if (!hostCooldownActive(untilMs)) return 0;
+    return untilMs - millis();
+}
+
 bool AdsbClient::poll(std::vector<Aircraft>& out) {
     if (WiFi.status() != WL_CONNECTED) return false;
+    const bool primaryCooling = hostCooldownActive(_primaryCooldownUntilMs);
+    const bool fallbackCooling = hostCooldownActive(_fallbackCooldownUntilMs);
+
     // Prefer the primary host, and give it a quick second try before touching the fallback:
     // the primary is reliable in practice, while the fallback can be slow to time out from
     // some networks (turning one transient primary blip into a long no-data gap + amber HUD).
-    if (fetchFrom(ADSB_PRIMARY_HOST, out)) return true;
-    if (fetchFrom(ADSB_PRIMARY_HOST, out)) return true;   // transient blip -> retry the healthy host
-    return fetchFrom(ADSB_FALLBACK_HOST, out);            // last resort
+    if (!primaryCooling) {
+        if (fetchFrom(ADSB_PRIMARY_HOST, out)) return true;
+        if (fetchFrom(ADSB_PRIMARY_HOST, out)) return true;   // transient blip -> retry the healthy host
+    }
+    if (!fallbackCooling) return fetchFrom(ADSB_FALLBACK_HOST, out);   // last resort / cooldown escape hatch
+    return false;
 }
 
 bool AdsbClient::fetchFrom(const char* host, std::vector<Aircraft>& out) {
@@ -58,7 +87,19 @@ bool AdsbClient::fetchFrom(const char* host, std::vector<Aircraft>& out) {
     http.addHeader("Accept", "application/json");
 
     const int code = http.GET();
-    if (code != 200) { Serial.printf("[adsb] HTTP %d (%s)\n", code, host); http.end(); return false; }
+    if (code != 200) {
+        if (code == 429) {
+            uint32_t &cooldownUntilMs = (strcmp(host, ADSB_PRIMARY_HOST) == 0)
+                ? _primaryCooldownUntilMs : _fallbackCooldownUntilMs;
+            cooldownUntilMs = millis() + ADSB_RATE_LIMIT_BACKOFF_MS;
+            Serial.printf("[adsb] HTTP 429 (%s) -> backing off for %lus\n",
+                          host, (unsigned long)(ADSB_RATE_LIMIT_BACKOFF_MS / 1000UL));
+        } else {
+            Serial.printf("[adsb] HTTP %d (%s)\n", code, host);
+        }
+        http.end();
+        return false;
+    }
 
     // Only keep the fields we use -> much smaller parsed document.
     JsonDocument filter(&s_jsonPsram);

@@ -24,7 +24,7 @@ static lv_obj_t *s_cardRoute = nullptr;
 static lv_obj_t *s_photo = nullptr, *s_photoCredit = nullptr;   // aircraft photo above the card
 static lv_timer_t *s_previewTimer = nullptr;
 static bool s_autoPreview = false;
-static char s_lastRouteReq[12] = "";
+static char s_lastRouteReq[24] = "";
 static lv_obj_t *s_hudWifi = nullptr, *s_hudCount = nullptr, *s_hudClock = nullptr, *s_hudBatt = nullptr, *s_hudDate = nullptr;
 static lv_obj_t *s_hudBars[4] = { nullptr, nullptr, nullptr, nullptr };   // WiFi signal-strength bars
 static lv_obj_t *s_list = nullptr;
@@ -32,6 +32,7 @@ static lv_obj_t *s_statsLbl = nullptr;
 static lv_obj_t *s_statsNet = nullptr;
 static lv_obj_t *s_hudGps   = nullptr;   // HUD satellite icon (hidden unless GPS auto-location is on)
 static lv_obj_t *s_statsGps = nullptr;   // Stats view GPS status line
+static char s_lastDetailLookupHex[8] = "";
 
 // --------------------------------------------------------------------- units
 // 0 = Aviation (ft, kt, km) · 1 = Metric (m, km/h, km) · 2 = Imperial (ft, mph, mi).
@@ -88,8 +89,18 @@ static void fold_ascii(char *s) {
             else                             r = '?';
             *o++ = r; p += 2; continue;
         }
-        ++p;                                            // skip other multibyte lead + continuation
-        while (*p >= 0x80 && *p < 0xC0) ++p;
+        switch (*p) {                                   // raw Latin-1 / CP1252 single-byte fallback
+            case 0xC4: case 0xE4: *o++ = 'a'; ++p; break;
+            case 0xD6: case 0xF6: *o++ = 'o'; ++p; break;
+            case 0xDC: case 0xFC: *o++ = 'u'; ++p; break;
+            case 0xC9: case 0xE9:
+            case 0xC8: case 0xE8: *o++ = 'e'; ++p; break;
+            case 0xD1: case 0xF1: *o++ = 'n'; ++p; break;
+            default:
+                ++p;                                    // skip other multibyte lead + continuation
+                while (*p >= 0x80 && *p < 0xC0) ++p;
+                break;
+        }
     }
     *o = 0;
 }
@@ -98,11 +109,19 @@ static void fold_ascii(char *s) {
 static void refresh_card(void) {
     AcInfo in;
     if (!radar::selected(in)) {
+        if (s_lastDetailLookupHex[0]) {
+            radar::setDetailLookup(s_lastDetailLookupHex, false);
+            s_lastDetailLookupHex[0] = 0;
+        }
         lv_obj_add_flag(s_card, LV_OBJ_FLAG_HIDDEN);
         if (s_photo)       lv_obj_add_flag(s_photo, LV_OBJ_FLAG_HIDDEN);
         if (s_photoCredit) lv_obj_add_flag(s_photoCredit, LV_OBJ_FLAG_HIDDEN);
         s_lastRouteReq[0] = 0;
         return;
+    }
+    if (strcmp(s_lastDetailLookupHex, in.hex) != 0) {
+        if (s_lastDetailLookupHex[0]) radar::setDetailLookup(s_lastDetailLookupHex, false);
+        snprintf(s_lastDetailLookupHex, sizeof(s_lastDetailLookupHex), "%s", in.hex);
     }
     lv_obj_clear_flag(s_card, LV_OBJ_FLAG_HIDDEN);
 
@@ -126,28 +145,34 @@ static void refresh_card(void) {
     lv_label_set_text(s_cardL, left);
     lv_label_set_text(s_cardR, right);
 
-    // route (origin -> destination), looked up asynchronously by callsign
-    if (in.call[0] && strcmp(in.call, s_lastRouteReq) != 0) {
-        snprintf(s_lastRouteReq, sizeof(s_lastRouteReq), "%s", in.call);
-        route_request(in.call);
+    // route (origin -> destination), looked up asynchronously by aircraft identity.
+    char routeReqKey[24];
+    if (in.hex[0] && in.call[0]) snprintf(routeReqKey, sizeof(routeReqKey), "%s/%s", in.hex, in.call);
+    else                         snprintf(routeReqKey, sizeof(routeReqKey), "%s", in.call[0] ? in.call : in.hex);
+    if (routeReqKey[0] && strcmp(routeReqKey, s_lastRouteReq) != 0) {
+        snprintf(s_lastRouteReq, sizeof(s_lastRouteReq), "%s", routeReqKey);
+        route_request(in.hex, in.call, in.lat, in.lon, in.track);
     }
     char rfrom[40], rto[40];
+    bool routeReady = false;
     if (!in.call[0]) {
         lv_label_set_text(s_cardRoute, "Route -");                 // no callsign -> nothing to look up
-    } else if (route_get(in.call, rfrom, sizeof(rfrom), rto, sizeof(rto))) {
+    } else if (route_get(in.hex, in.call, rfrom, sizeof(rfrom), rto, sizeof(rto))) {
         char rt[96];
         if (rfrom[0] || rto[0]) snprintf(rt, sizeof(rt), "%s -> %s", rfrom[0] ? rfrom : "?", rto[0] ? rto : "?");
         else                    snprintf(rt, sizeof(rt), "Route unavailable");
         fold_ascii(rt);
         lv_label_set_text(s_cardRoute, rt);
+        routeReady = true;
     } else {
-        route_request(in.call);                                  // queue/re-prioritize a cache miss
+        route_request(in.hex, in.call, in.lat, in.lon, in.track); // queue/re-prioritize a cache miss
         lv_label_set_text(s_cardRoute, "Looking up route...");     // pending: lookup in flight
     }
 
     // aircraft photo (planespotters), shown above the card when one is available
     if (in.hex[0]) photo_request(in.hex, in.type);
     int pw = 0, ph = 0; char pcred[72];
+    bool photoReady = false;
     if (s_photo && in.hex[0] && photo_get(in.hex, &pw, &ph, pcred, sizeof(pcred)) && pw > 0 && ph > 0) {
         lv_color_t *pbuf = photo_pixels(in.hex);
         lv_canvas_set_buffer(s_photo, pbuf, pw, ph, LV_IMG_CF_TRUE_COLOR);
@@ -155,9 +180,11 @@ static void refresh_card(void) {
         lv_obj_align(s_photo, LV_ALIGN_CENTER, 0, -28 - ph / 2);   // sit lower: fill the band down to the card
         lv_obj_clear_flag(s_photo, LV_OBJ_FLAG_HIDDEN);
         lv_obj_invalidate(s_photo);
+        photoReady = true;
         if (s_photoCredit) {
             char c[96];
             snprintf(c, sizeof(c), "Photo: %s", pcred[0] ? pcred : "planespotters.net");
+            fold_ascii(c);
             lv_label_set_text(s_photoCredit, c);
             lv_obj_align_to(s_photoCredit, s_photo, LV_ALIGN_OUT_BOTTOM_MID, 0, 1);
             lv_obj_clear_flag(s_photoCredit, LV_OBJ_FLAG_HIDDEN);
@@ -174,6 +201,8 @@ static void refresh_card(void) {
             lv_obj_clear_flag(s_photoCredit, LV_OBJ_FLAG_HIDDEN);
         }
     }
+    const bool detailBusy = in.hex[0] && ((!routeReady && in.call[0]) || !photoReady);
+    radar::setDetailLookup(in.hex, detailBusy);
 }
 
 // --------------------------------------------------------------------- input
@@ -186,6 +215,15 @@ static void (*s_appSwitchCb)(void) = nullptr;
 static void (*s_firmwareSwitchCb)(void) = nullptr;
 static lv_obj_t *s_zoomBtn = nullptr, *s_zoomLbl = nullptr;
 static lv_obj_t *s_tamaBtn = nullptr, *s_tamaLbl = nullptr, *s_printerBtn = nullptr, *s_printerLbl = nullptr;
+static constexpr lv_coord_t RANGE_TOUCH_STRIP_PX = 10;   // require a touch in the very bottom strip
+
+static bool range_touch_active() {
+    lv_indev_t *indev = lv_indev_get_act();
+    if (!indev) return false;
+    lv_point_t p;
+    lv_indev_get_point(indev, &p);
+    return p.y >= SCREEN_H - RANGE_TOUCH_STRIP_PX;
+}
 
 void ui_set_range_cb(void (*cb)(float)) { s_rangeCb = cb; }
 void ui_set_app_switch_cb(void (*cb)(void)) { s_appSwitchCb = cb; }
@@ -195,16 +233,33 @@ static bool radar_top_center_point(lv_point_t p) {
     return p.x > 188 && p.x < 278 && p.y < 42;
 }
 
-static void zoom_cb(lv_event_t *e) {   // fires on PRESS (robust vs scroll-cancel on the tileview)
-    (void)e;
-    static uint32_t last = 0;
-    const uint32_t now = lv_tick_get();
-    if (now - last < 250) return;      // debounce repeated/held presses
-    last = now;
-    if (!s_rangeCb) return;
-    const int n = (int)(sizeof(RANGE_STEPS_KM) / sizeof(RANGE_STEPS_KM[0]));
-    s_rangeIdx = (s_rangeIdx + 1) % n;
-    s_rangeCb(RANGE_STEPS_KM[s_rangeIdx]);
+static void zoom_btn_cb(lv_event_t *e) {
+    const lv_event_code_t code = lv_event_get_code(e);
+    if (code == LV_EVENT_PRESSED) {
+        if (range_touch_active()) {
+            if (s_zoomBtn) lv_obj_set_style_bg_color(s_zoomBtn, UI_GREEN, 0);
+            if (s_zoomLbl) lv_obj_set_style_text_color(s_zoomLbl, lv_color_black(), 0);
+        } else {
+            if (s_zoomBtn) lv_obj_set_style_bg_color(s_zoomBtn, UI_PANEL, 0);
+            if (s_zoomLbl) lv_obj_set_style_text_color(s_zoomLbl, UI_GREEN, 0);
+        }
+    } else if (code == LV_EVENT_CLICKED) {
+        static uint32_t last = 0;
+        if (range_touch_active()) {
+            const uint32_t now = lv_tick_get();
+            if (now - last >= 250 && s_rangeCb) {
+                last = now;
+                const int n = (int)(sizeof(RANGE_STEPS_KM) / sizeof(RANGE_STEPS_KM[0]));
+                s_rangeIdx = (s_rangeIdx + 1) % n;
+                s_rangeCb(RANGE_STEPS_KM[s_rangeIdx]);
+            }
+        }
+        if (s_zoomBtn) lv_obj_set_style_bg_color(s_zoomBtn, UI_PANEL, 0);
+        if (s_zoomLbl) lv_obj_set_style_text_color(s_zoomLbl, UI_GREEN, 0);
+    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        if (s_zoomBtn) lv_obj_set_style_bg_color(s_zoomBtn, UI_PANEL, 0);
+        if (s_zoomLbl) lv_obj_set_style_text_color(s_zoomLbl, UI_GREEN, 0);
+    }
 }
 
 void ui_set_range_km(float km) {
@@ -681,11 +736,12 @@ void ui_create(void) {
     lv_obj_add_event_cb(s_tileRadar, radar_longpress_cb, LV_EVENT_LONG_PRESSED, NULL);
     build_card();
 
-    // on-screen range/zoom button (reliable single tap; bottom, above the 'S' marker)
+    // on-screen range/zoom button. Keep the touch target tight and low so taps on
+    // nearby aircraft don't accidentally change range.
     s_zoomBtn = lv_btn_create(s_tileRadar);
-    lv_obj_set_size(s_zoomBtn, 74, 30);
-    lv_obj_set_ext_click_area(s_zoomBtn, 22);   // invisibly enlarge the tap target (easier to hit)
-    lv_obj_align(s_zoomBtn, LV_ALIGN_BOTTOM_MID, 0, -26);
+    lv_obj_set_size(s_zoomBtn, 74, 24);
+    lv_obj_set_ext_click_area(s_zoomBtn, 0);
+    lv_obj_align(s_zoomBtn, LV_ALIGN_BOTTOM_MID, 0, -4);
     lv_obj_set_style_radius(s_zoomBtn, 12, 0);
     lv_obj_set_style_bg_color(s_zoomBtn, UI_PANEL, 0);
     lv_obj_set_style_bg_opa(s_zoomBtn, 225, 0);
@@ -693,7 +749,7 @@ void ui_create(void) {
     lv_obj_set_style_border_width(s_zoomBtn, 1, 0);
     lv_obj_set_style_border_opa(s_zoomBtn, 170, 0);
     lv_obj_clear_flag(s_zoomBtn, LV_OBJ_FLAG_SCROLL_CHAIN);  // tapping it must not swipe the tileview
-    lv_obj_add_event_cb(s_zoomBtn, zoom_cb, LV_EVENT_PRESSED, NULL);  // fire on touch-down, not release
+    lv_obj_add_event_cb(s_zoomBtn, zoom_btn_cb, LV_EVENT_ALL, nullptr);
     s_zoomLbl = lv_label_create(s_zoomBtn);
     lv_label_set_text(s_zoomLbl, "30 km");
     lv_obj_set_style_text_font(s_zoomLbl, &lv_font_montserrat_14, 0);

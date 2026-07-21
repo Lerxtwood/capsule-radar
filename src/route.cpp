@@ -5,68 +5,138 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <mutex>
+#include <chrono>
 
 static std::mutex s_m;
 #define ROUTE_RESULTS 16
 #define ROUTE_QUEUE   16
-struct RouteResult { char call[12], from[40], to[40]; uint32_t stamp; };
+struct RouteItem { char key[24], hex[12], call[12]; float lat, lon, track; };
+struct RouteResult { char key[24], from[40], to[40]; uint32_t stamp; uint64_t fetchedMs; };
 static RouteResult s_results[ROUTE_RESULTS] = {};
-static char s_queue[ROUTE_QUEUE][12] = {};
-static char s_priorityCall[12] = "";
+static RouteItem s_queue[ROUTE_QUEUE] = {};
+static RouteItem s_priorityItem = {};
 static int s_qCount = 0;
 static uint32_t s_stamp = 0;
+static constexpr uint64_t ROUTE_RESULT_TTL_MS = 15ULL * 60ULL * 1000ULL;
 
-static int find_result(const char *call) {
+static uint64_t monotonic_ms() {
+    using namespace std::chrono;
+    return duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+static bool route_result_expired(const RouteResult &result) {
+    return result.fetchedMs != 0 && (monotonic_ms() - result.fetchedMs) > ROUTE_RESULT_TTL_MS;
+}
+
+static void normalize_token(const char *in, char *out, size_t on) {
+    size_t j = 0;
+    for (const char *p = in; p && *p && j + 1 < on; ++p) {
+        if (*p == ' ') continue;
+        char c = *p;
+        if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+        out[j++] = c;
+    }
+    out[j] = 0;
+}
+
+static void route_identity_key(const char *hex, const char *callsign, char *out, size_t on) {
+    char normHex[12] = "", normCall[12] = "";
+    normalize_token(hex, normHex, sizeof(normHex));
+    normalize_token(callsign, normCall, sizeof(normCall));
+    if (normHex[0] && normCall[0]) snprintf(out, on, "%s/%s", normHex, normCall);
+    else if (normHex[0])          snprintf(out, on, "%s", normHex);
+    else                          snprintf(out, on, "%s", normCall);
+}
+
+static int find_result(const char *key) {
     for (int i = 0; i < ROUTE_RESULTS; ++i)
-        if (s_results[i].call[0] && strcmp(call, s_results[i].call) == 0) return i;
+        if (s_results[i].key[0] && strcmp(key, s_results[i].key) == 0) return i;
     return -1;
 }
 
-static void queue_request(const char *callsign, bool priority) {
-    if (!callsign || !callsign[0]) return;
+static void queue_request(const char *hex, const char *callsign, float lat, float lon, float track, bool priority) {
+    char key[24] = "";
+    route_identity_key(hex, callsign, key, sizeof(key));
+    if (!key[0]) return;
     std::lock_guard<std::mutex> g(s_m);
-    if (priority) snprintf(s_priorityCall, sizeof(s_priorityCall), "%s", callsign);
-    const int ri = find_result(callsign);
-    if (ri >= 0) { s_results[ri].stamp = ++s_stamp; return; }
+    if (priority) {
+        snprintf(s_priorityItem.key, sizeof(s_priorityItem.key), "%s", key);
+        snprintf(s_priorityItem.hex, sizeof(s_priorityItem.hex), "%s", hex ? hex : "");
+        snprintf(s_priorityItem.call, sizeof(s_priorityItem.call), "%s", callsign ? callsign : "");
+        s_priorityItem.lat = lat;
+        s_priorityItem.lon = lon;
+        s_priorityItem.track = track;
+    }
+    const int ri = find_result(key);
+    if (ri >= 0) {
+        if (!route_result_expired(s_results[ri])) {
+            s_results[ri].stamp = ++s_stamp;
+            return;
+        }
+        s_results[ri].key[0] = 0;
+        s_results[ri].from[0] = 0;
+        s_results[ri].to[0] = 0;
+        s_results[ri].fetchedMs = 0;
+    }
     for (int i = 0; i < s_qCount; ++i) {
-        if (strcmp(callsign, s_queue[i]) != 0) continue;
+        if (strcmp(key, s_queue[i].key) != 0) continue;
         if (priority && i > 0) {
-            char tmp[12]; snprintf(tmp, sizeof(tmp), "%s", s_queue[i]);
-            for (int j = i; j > 0; --j) snprintf(s_queue[j], sizeof(s_queue[j]), "%s", s_queue[j - 1]);
-            snprintf(s_queue[0], sizeof(s_queue[0]), "%s", tmp);
+            RouteItem tmp = s_queue[i];
+            for (int j = i; j > 0; --j) s_queue[j] = s_queue[j - 1];
+            s_queue[0] = tmp;
         }
         return;
     }
     if (priority) {
         if (s_qCount < ROUTE_QUEUE) ++s_qCount;
-        for (int i = s_qCount - 1; i > 0; --i) snprintf(s_queue[i], sizeof(s_queue[i]), "%s", s_queue[i - 1]);
-        snprintf(s_queue[0], sizeof(s_queue[0]), "%s", callsign);
+        for (int i = s_qCount - 1; i > 0; --i) s_queue[i] = s_queue[i - 1];
+        snprintf(s_queue[0].key, sizeof(s_queue[0].key), "%s", key);
+        snprintf(s_queue[0].hex, sizeof(s_queue[0].hex), "%s", hex ? hex : "");
+        snprintf(s_queue[0].call, sizeof(s_queue[0].call), "%s", callsign ? callsign : "");
+        s_queue[0].lat = lat;
+        s_queue[0].lon = lon;
+        s_queue[0].track = track;
     } else if (s_qCount < ROUTE_QUEUE) {
-        snprintf(s_queue[s_qCount++], sizeof(s_queue[0]), "%s", callsign);
+        snprintf(s_queue[s_qCount].key, sizeof(s_queue[s_qCount].key), "%s", key);
+        snprintf(s_queue[s_qCount].hex, sizeof(s_queue[s_qCount].hex), "%s", hex ? hex : "");
+        snprintf(s_queue[s_qCount].call, sizeof(s_queue[s_qCount].call), "%s", callsign ? callsign : "");
+        s_queue[s_qCount].lat = lat;
+        s_queue[s_qCount].lon = lon;
+        s_queue[s_qCount].track = track;
+        ++s_qCount;
     }
 }
 
-void route_request(const char *callsign) {
-    queue_request(callsign, true);
+void route_request(const char *hex, const char *callsign, float lat, float lon, float track) {
+    queue_request(hex, callsign, lat, lon, track, true);
 }
-void route_prefetch(const char *callsign) { queue_request(callsign, false); }
+void route_prefetch(const char *hex, const char *callsign, float lat, float lon, float track) { queue_request(hex, callsign, lat, lon, track, false); }
 void route_cancel_prefetches() {
     std::lock_guard<std::mutex> g(s_m);
     int keep = -1;
     for (int i = 0; i < s_qCount; ++i)
-        if (s_priorityCall[0] && strcmp(s_queue[i], s_priorityCall) == 0) { keep = i; break; }
+        if (s_priorityItem.key[0] && strcmp(s_queue[i].key, s_priorityItem.key) == 0) { keep = i; break; }
     if (keep >= 0) {
-        snprintf(s_queue[0], sizeof(s_queue[0]), "%s", s_queue[keep]);
+        s_queue[0] = s_queue[keep];
         s_qCount = 1;
     } else s_qCount = 0;
 }
 
-bool route_pending(char *callOut, size_t n) {
+bool route_pending(char *hexOut, size_t hn, char *callOut, size_t cn, float *latOut, float *lonOut, float *trackOut) {
     std::lock_guard<std::mutex> g(s_m);
     if (s_qCount > 0) {
-        snprintf(callOut, n, "%s", s_queue[0]);
+        if (hn) snprintf(hexOut, hn, "%s", s_queue[0].hex);
+        if (cn) snprintf(callOut, cn, "%s", s_queue[0].call);
+        if (latOut) *latOut = s_queue[0].lat;
+        if (lonOut) *lonOut = s_queue[0].lon;
+        if (trackOut) *trackOut = s_queue[0].track;
         return true;
     }
+    if (hn) hexOut[0] = 0;
+    if (cn) callOut[0] = 0;
+    if (latOut) *latOut = 0.0f;
+    if (lonOut) *lonOut = 0.0f;
+    if (trackOut) *trackOut = 0.0f / 0.0f;
     return false;
 }
 
@@ -104,33 +174,45 @@ static void ascii_fold(const char *in, char *out, size_t n) {
     out[o] = 0;
 }
 
-void route_store(const char *callsign, const char *from, const char *to) {
+void route_store(const char *hex, const char *callsign, const char *from, const char *to) {
     std::lock_guard<std::mutex> g(s_m);
-    if (!callsign || !callsign[0]) return;
-    int slot = find_result(callsign);
+    char key[24] = "";
+    route_identity_key(hex, callsign, key, sizeof(key));
+    if (!key[0]) return;
+    int slot = find_result(key);
     if (slot < 0) {
         slot = 0;
         for (int i = 0; i < ROUTE_RESULTS; ++i) {
-            if (!s_results[i].call[0]) { slot = i; break; }
+            if (!s_results[i].key[0]) { slot = i; break; }
             if (s_results[i].stamp < s_results[slot].stamp) slot = i;
         }
     }
-    snprintf(s_results[slot].call, sizeof(s_results[slot].call), "%s", callsign);
+    snprintf(s_results[slot].key, sizeof(s_results[slot].key), "%s", key);
     ascii_fold(from, s_results[slot].from, sizeof(s_results[slot].from));
     ascii_fold(to,   s_results[slot].to,   sizeof(s_results[slot].to));
     s_results[slot].stamp = ++s_stamp;
+    s_results[slot].fetchedMs = monotonic_ms();
     for (int i = 0; i < s_qCount;) {
-        if (strcmp(callsign, s_queue[i]) == 0) {
-            for (int j = i; j + 1 < s_qCount; ++j) snprintf(s_queue[j], sizeof(s_queue[j]), "%s", s_queue[j + 1]);
+        if (strcmp(key, s_queue[i].key) == 0) {
+            for (int j = i; j + 1 < s_qCount; ++j) s_queue[j] = s_queue[j + 1];
             --s_qCount;
         } else ++i;
     }
 }
 
-bool route_get(const char *callsign, char *from, size_t fn, char *to, size_t tn) {
+bool route_get(const char *hex, const char *callsign, char *from, size_t fn, char *to, size_t tn) {
     std::lock_guard<std::mutex> g(s_m);
-    const int i = callsign ? find_result(callsign) : -1;
+    char key[24] = "";
+    route_identity_key(hex, callsign, key, sizeof(key));
+    const int i = key[0] ? find_result(key) : -1;
     if (i >= 0) {
+        if (route_result_expired(s_results[i])) {
+            s_results[i].key[0] = 0;
+            s_results[i].from[0] = 0;
+            s_results[i].to[0] = 0;
+            s_results[i].fetchedMs = 0;
+            return false;
+        }
         snprintf(from, fn, "%s", s_results[i].from);
         snprintf(to, tn, "%s", s_results[i].to);
         s_results[i].stamp = ++s_stamp;

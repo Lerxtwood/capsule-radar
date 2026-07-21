@@ -85,6 +85,7 @@ static volatile bool         g_requery = false;                      // range ch
 static float                 g_requeryKm = 0.0f;
 static volatile bool         g_feedOk = true;                        // ADS-B feed healthy? (HUD warning)
 static volatile uint32_t     g_lastFeedOkMs = 0;                     // millis() of the last good poll (HUD staleness)
+static volatile bool         g_detailDirty = false;                  // route/photo finished -> refresh card without waiting for next feed poll
 static volatile uint32_t     g_rebootAtMs = 0;                       // !=0: reboot when millis() reaches it (clean start after WiFi config)
 static volatile bool         g_firmwareUpdateInProgress = false;     // pause background network work while self-flashing
 static bool                  g_firmwareUpdateMode = false;           // lightweight boot mode for GitHub TLS + self-update
@@ -187,31 +188,53 @@ static void adsb_task(void*) {
                         xSemaphoreGive(g_ac_mutex);
                     }
                 } else {
-                    Serial.println("[adsb] poll failed");
-                    if (++failCount >= 5) g_feedOk = false;   // sustained outage -> HUD warning
+                    if (g_adsb.cooldownActive()) {
+                        const uint32_t remainMs = g_adsb.cooldownRemainingMs();
+                        Serial.printf("[adsb] cooldown active (%lus remaining)\n",
+                                      (unsigned long)((remainMs + 999UL) / 1000UL));
+                    } else {
+                        Serial.println("[adsb] poll failed");
+                        if (++failCount >= 5) g_feedOk = false;   // sustained outage -> HUD warning
+                    }
                 }
             }
             // Then the on-demand lookups for the selected aircraft. Their timeouts are kept
             // short (see photo_client / route_client) so a slow photo server can't freeze the
             // feed for long; the next loop iteration polls again as soon as they return.
-            char wantCall[12];
-            if (route_pending(wantCall, sizeof(wantCall))) {
+            char wantHex[12], wantCall[12];
+            float wantLat = 0.0f, wantLon = 0.0f, wantTrack = 0.0f / 0.0f;
+            if (route_pending(wantHex, sizeof(wantHex), wantCall, sizeof(wantCall), &wantLat, &wantLon, &wantTrack)) {
                 char from[40] = "", to[40] = "";
-                if (route_cache_get(wantCall, from, sizeof(from), to, sizeof(to))) {
-                    route_store(wantCall, from, to);                       // NVS hit, no network
-                    Serial.printf("[route] %s (cache): '%s' -> '%s'\n", wantCall, from, to);
-                } else if (route_fetch(wantCall, from, sizeof(from), to, sizeof(to))) {
-                    route_store(wantCall, from, to);
-                    route_cache_put(wantCall, from, to);                  // remember across reboots
-                    Serial.printf("[route] %s (net): '%s' -> '%s'\n", wantCall, from, to);
+                if (route_cache_get(wantHex, wantCall, from, sizeof(from), to, sizeof(to))) {
+                    route_store(wantHex, wantCall, from, to);                       // NVS hit, no network
+                    g_detailDirty = true;
+                    Serial.printf("[route] %s / %s (cache): '%s' -> '%s'\n",
+                                  wantHex[0] ? wantHex : "-", wantCall[0] ? wantCall : "-",
+                                  from, to);
+                } else if (route_fetch(wantHex, wantCall, wantLat, wantLon, wantTrack, from, sizeof(from), to, sizeof(to))) {
+                    route_store(wantHex, wantCall, from, to);
+                    g_detailDirty = true;
+                    if (strcmp(route_fetch_last_mode(), "adsbdb-weak") != 0) {
+                        route_cache_put(wantHex, wantCall, from, to);              // remember across reboots
+                    }
+                    Serial.printf("[route] %s / %s (%s %d): '%s' -> '%s'\n",
+                                  wantHex[0] ? wantHex : "-", wantCall[0] ? wantCall : "-",
+                                  route_fetch_last_mode(), route_fetch_last_status(),
+                                  from, to);
                 } else {
-                    route_store(wantCall, from, to);   // empty -> don't refetch this session
-                    Serial.printf("[route] %s: no route\n", wantCall);
+                    route_store(wantHex, wantCall, from, to);   // empty -> don't refetch this session
+                    g_detailDirty = true;
+                    Serial.printf("[route] %s / %s (%s %d): no route [%s]\n",
+                                  wantHex[0] ? wantHex : "-", wantCall[0] ? wantCall : "-",
+                                  route_fetch_last_mode(), route_fetch_last_status(),
+                                  route_fetch_last_url());
                 }
             }
-            char wantHex[10], wantType[8];
-            if (photo_pending(wantHex, sizeof(wantHex), wantType, sizeof(wantType)))
-                photo_fetch(wantHex, g_genericPhotos ? wantType : "");
+            char photoHex[10], wantType[8];
+            if (photo_pending(photoHex, sizeof(photoHex), wantType, sizeof(wantType))) {
+                photo_fetch(photoHex, g_genericPhotos ? wantType : "");
+                g_detailDirty = true;
+            }
         }
         vTaskDelay(pdMS_TO_TICKS(250));
     }
@@ -314,7 +337,7 @@ static void checkAudioEvents() {
         // new-in-range pings (on entry), gated by the alert mode
         if (isNew) {
             if (g_prefetchDetails) {
-                if (ac.flight.length()) route_prefetch(ac.flight.c_str());
+                if (ac.flight.length()) route_prefetch(ac.hex.c_str(), ac.flight.c_str(), (float)ac.lat, (float)ac.lon, ac.track);
                 photo_prefetch(ac.hex.c_str(), ac.type.c_str());
                 bool tracked = false;
                 for (PrefetchTrack &p : g_prefetching) {
@@ -344,7 +367,8 @@ static void updatePrefetchIndicators() {
     for (size_t i = 0; i < g_prefetching.size();) {
         char from[40], to[40];
         const bool routeDone = g_prefetching[i].call.empty() ||
-            route_get(g_prefetching[i].call.c_str(), from, sizeof(from), to, sizeof(to));
+            route_get(g_prefetching[i].hex.c_str(), g_prefetching[i].call.c_str(),
+                      from, sizeof(from), to, sizeof(to));
         const bool photoDone = photo_done(g_prefetching[i].hex.c_str());
         const uint32_t elapsed = millis() - g_prefetching[i].startedMs;
         const bool timedOut = elapsed > 60000UL;
@@ -1995,6 +2019,10 @@ void loop() {
             ui_on_data_updated();              // refresh card/list/stats
             checkAudioEvents();                // ping new-in-range / emergency / military
         }
+    }
+    if (g_appMode == 0 && g_detailDirty) {
+        g_detailDirty = false;
+        ui_on_data_updated();          // route/photo landed; refresh detail card immediately
     }
     if (g_appMode == 0) updatePrefetchIndicators();
 

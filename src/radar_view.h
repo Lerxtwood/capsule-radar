@@ -25,6 +25,9 @@ struct AcInfo {
     char  hex[8];
     char  call[12];
     char  type[8];
+    float lat;
+    float lon;
+    float track;
     float altFt;
     bool  onGround;
     float vsFpm;        // NaN if unknown
@@ -73,5 +76,6 @@ void setTrailLength(int level);                  // 0=off 1=short 2=medium 3=lon
 void setTrackingFontSize(int level);             // 0=small 1=medium 2=large aircraft floating labels
 int  trackingFontSize();
 void setPrefetching(const char *hex, bool active); // flash a contact while detail data is being fetched
+void setDetailLookup(const char *hex, bool active); // flash the selected contact during manual detail lookup
 
 } // namespace radar

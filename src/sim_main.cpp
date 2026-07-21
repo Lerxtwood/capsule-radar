@@ -195,13 +195,14 @@ int main(int argc, char **argv) {
             ui_set_netinfo("Configure at\ncapsuleradar.local\n192.168.1.42");  // mock net info
         }
         // fulfil route lookups with a mock (the sim has no network)
-        char wc[12];
-        if (route_pending(wc, sizeof(wc))) {
+        char wh[12], wc[12];
+        float wlat = 0.0f, wlon = 0.0f, wtrack = 0.0f;
+        if (route_pending(wh, sizeof(wh), wc, sizeof(wc), &wlat, &wlon, &wtrack)) {
             static const char *cities[] = { "Madrid", "London", "Paris", "Berlin",
                                             "Rome", "Lisbon", "Amsterdam", "Dublin" };
             int h = 0;
             for (const char *p = wc; *p; ++p) h += (unsigned char)*p;
-            route_store(wc, cities[h % 8], cities[(h / 2 + 3) % 8]);
+            route_store(wh, wc, cities[h % 8], cities[(h / 2 + 3) % 8]);
         }
         lv_timer_handler();
 
@@ -248,7 +249,11 @@ int main(int argc, char **argv) {
             }
             radar::select(0);                            // select an aircraft so the card shows
             ui_on_data_updated();
-            { char wc[12]; if (route_pending(wc, sizeof(wc))) route_store(wc, "Madrid", "London"); }
+            {
+                char wh[12], wc[12];
+                float wlat = 0.0f, wlon = 0.0f, wtrack = 0.0f;
+                if (route_pending(wh, sizeof(wh), wc, sizeof(wc), &wlat, &wlon, &wtrack)) route_store(wh, wc, "Madrid", "London");
+            }
             ui_on_data_updated();                        // pick up the mock route for the card
             int ow, oh;
             SDL_GetRendererOutputSize(s_ren, &ow, &oh);

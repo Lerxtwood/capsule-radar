@@ -98,6 +98,7 @@ static int         s_frameCtr     = 0;
 static lv_coord_t  s_cx = SCREEN_CX, s_cy = SCREEN_CY;
 static std::string s_selHex;
 static std::set<std::string> s_prefetching;
+static std::set<std::string> s_detailLookup;
 
 struct FlowSeg { lv_point_t a, b; uint16_t gen; };   // gen = the poll it was laid down on
 static std::deque<FlowSeg> s_flow;
@@ -114,6 +115,7 @@ struct AcDraw {
     char       hex[8];
     char       call[12];
     char       type[8];
+    float      lat, lon;
     char       altTxt[12];
     float      altFt;
     bool       onGround;
@@ -151,6 +153,53 @@ static int trackingLineH() {
         case 1: return 18;
         default: return 16;
     }
+}
+
+static void ascii_fold_label(const char *in, char *out, size_t n) {
+    size_t o = 0;
+    for (size_t i = 0; in && in[i] && o + 1 < n;) {
+        const unsigned char c = (unsigned char)in[i];
+        if (c < 0x80) { out[o++] = in[i++]; continue; }
+        if (c == 0xC3 && in[i + 1]) {
+            const unsigned char d = (unsigned char)in[i + 1];
+            char r;
+            if      (d >= 0x80 && d <= 0x85) r = 'A';
+            else if (d >= 0xA0 && d <= 0xA5) r = 'a';
+            else if (d == 0x87)              r = 'C';
+            else if (d == 0xA7)              r = 'c';
+            else if (d >= 0x88 && d <= 0x8B) r = 'E';
+            else if (d >= 0xA8 && d <= 0xAB) r = 'e';
+            else if (d >= 0x8C && d <= 0x8F) r = 'I';
+            else if (d >= 0xAC && d <= 0xAF) r = 'i';
+            else if (d == 0x91)              r = 'N';
+            else if (d == 0xB1)              r = 'n';
+            else if (d >= 0x92 && d <= 0x96) r = 'O';
+            else if (d >= 0xB2 && d <= 0xB6) r = 'o';
+            else if (d >= 0x99 && d <= 0x9C) r = 'U';
+            else if (d >= 0xB9 && d <= 0xBC) r = 'u';
+            else if (d == 0x9F)              r = 's';
+            else                             r = '?';
+            out[o++] = r;
+            i += 2;
+            continue;
+        }
+        switch (c) {
+            case 0xC4: case 0xE4: out[o++] = 'a'; break;
+            case 0xD6: case 0xF6: out[o++] = 'o'; break;
+            case 0xDC: case 0xFC: out[o++] = 'u'; break;
+            case 0xC9: case 0xE9:
+            case 0xC8: case 0xE8: out[o++] = 'e'; break;
+            case 0xD1: case 0xF1: out[o++] = 'n'; break;
+            default: out[o++] = '?'; break;
+        }
+        ++i;
+    }
+    out[o] = 0;
+}
+
+static bool lookup_active_hex(const char *hex) {
+    return hex && hex[0] &&
+           (s_prefetching.count(hex) != 0 || s_detailLookup.count(hex) != 0);
 }
 
 static void show(lv_obj_t *o, bool v) {
@@ -354,10 +403,10 @@ static void sweep_timer_cb(lv_timer_t *t) {
     if (++s_frameCtr % 3 == 0) interp_step();         // smooth glyph motion (~90 ms cadence)
     static bool lastFlashOn = true;
     const bool flashOn = ((lv_tick_get() / 250U) & 1U) == 0;
-    if (flashOn != lastFlashOn && s_acLayer && !s_prefetching.empty()) {
+    if (flashOn != lastFlashOn && s_acLayer && (!s_prefetching.empty() || !s_detailLookup.empty())) {
         lastFlashOn = flashOn;
         for (const AcDraw &ac : s_acs) {
-            if (!ac.inRange || !s_prefetching.count(ac.hex)) continue;
+            if (!ac.inRange || !lookup_active_hex(ac.hex)) continue;
             const lv_coord_t r = orb() ? 44 : 18;
             lv_area_t a = { (lv_coord_t)(ac.pos.x - r), (lv_coord_t)(ac.pos.y - r),
                             (lv_coord_t)(ac.pos.x + r), (lv_coord_t)(ac.pos.y + r) };
@@ -477,7 +526,7 @@ static void ac_draw_cb(lv_event_t *e) {
     int balls = 0, arrows = 0;
 
     for (const AcDraw &ac : s_acs) {
-        const bool flashOff = s_prefetching.count(ac.hex) && (((lv_tick_get() / 250U) & 1U) != 0);
+        const bool flashOff = lookup_active_hex(ac.hex) && (((lv_tick_get() / 250U) & 1U) != 0);
         if (drg) {
             if (ac.inRange) {
                 if (balls >= ORB_BLIPS) continue;   // up to 7 in-range balls
@@ -687,6 +736,19 @@ void setPrefetching(const char *hex, bool active) {
     }
 }
 
+void setDetailLookup(const char *hex, bool active) {
+    if (!hex || !hex[0]) return;
+    if (active) s_detailLookup.insert(hex);
+    else        s_detailLookup.erase(hex);
+    if (!s_acLayer) return;
+    for (const AcDraw &ac : s_acs) {
+        if (strcmp(ac.hex, hex) != 0) continue;
+        lv_area_t a = glyph_bbox(ac.pos);
+        lv_obj_invalidate_area(s_acLayer, &a);
+        break;
+    }
+}
+
 void init(void *lv_parent) {
     lv_obj_t *parent = (lv_obj_t *)lv_parent;
     s_parent = parent;
@@ -821,8 +883,10 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
         d.color = alt_color(ac.altBaro, ac.onGround);
         d.emergency = acIsEmergency(ac.squawk);
         snprintf(d.hex,  sizeof(d.hex),  "%s", ac.hex.c_str());
-        snprintf(d.call, sizeof(d.call), "%s", ac.flight.c_str());
-        snprintf(d.type, sizeof(d.type), "%s", ac.type.c_str());
+        ascii_fold_label(ac.flight.c_str(), d.call, sizeof(d.call));
+        ascii_fold_label(ac.type.c_str(), d.type, sizeof(d.type));
+        d.lat = (float)ac.lat;
+        d.lon = (float)ac.lon;
         d.altFt = ac.altBaro;
         d.onGround = ac.onGround;
         d.vsFpm = ac.baroRate;
@@ -926,6 +990,9 @@ static void fill_info(const AcDraw &a, AcInfo &out) {
     snprintf(out.hex, sizeof(out.hex), "%s", a.hex);
     snprintf(out.call, sizeof(out.call), "%s", a.call);
     snprintf(out.type, sizeof(out.type), "%s", a.type);
+    out.lat = a.lat;
+    out.lon = a.lon;
+    out.track = a.track;
     out.altFt = a.altFt; out.onGround = a.onGround;
     out.vsFpm = a.vsFpm; out.gsKt = a.gsKt;
     out.distKm = a.distKm; out.bearingDeg = a.bearingDeg;
