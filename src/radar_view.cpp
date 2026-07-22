@@ -8,6 +8,7 @@
 #include "geo.h"
 #include "coastline.h"
 #include "airports.h"
+#include "route.h"
 #include <lvgl.h>
 #include <math.h>
 #include <stdio.h>
@@ -117,6 +118,7 @@ struct AcDraw {
     char       type[8];
     float      lat, lon;
     char       altTxt[12];
+    char       routeTxt[24];
     float      altFt;
     bool       onGround;
     float      vsFpm, gsKt, distKm, bearingDeg;
@@ -153,6 +155,39 @@ static int trackingLineH() {
         case 1: return 18;
         default: return 16;
     }
+}
+
+static void compact_route_code_line(const char *line1, char *out, size_t n) {
+    if (!out || n == 0) return;
+    out[0] = 0;
+    if (!line1 || !line1[0]) return;
+
+    const char *arrow = strstr(line1, "->");
+    if (!arrow) return;
+
+    char from[12] = "";
+    char to[12] = "";
+
+    size_t from_len = 0;
+    for (const char *p = line1; p < arrow && from_len + 1 < sizeof(from); ++p) {
+        if ((*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9')) {
+            from[from_len++] = *p;
+        }
+    }
+    from[from_len] = 0;
+
+    size_t to_len = 0;
+    for (const char *p = arrow + 2; *p && to_len + 1 < sizeof(to); ++p) {
+        if ((*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9')) {
+            to[to_len++] = *p;
+        } else if (to_len > 0) {
+            break;
+        }
+    }
+    to[to_len] = 0;
+
+    if (!from[0] || !to[0]) return;
+    snprintf(out, n, "%s-%s", from, to);
 }
 
 static void ascii_fold_label(const char *in, char *out, size_t n) {
@@ -582,8 +617,8 @@ static void ac_draw_cb(lv_event_t *e) {
         // floating labels (phosphor only; orb keeps clean balls + the tap card)
         if (!drg) {
             const int lineH = trackingLineH();
-            const int topY = -20 - (s_trackingFontSize * 3);
-            const int labelW = (s_trackingFontSize == 2) ? 170 : ((s_trackingFontSize == 1) ? 155 : 130);
+            const int topY = -28 - (s_trackingFontSize * 4);
+            const int labelW = (s_trackingFontSize == 2) ? 176 : ((s_trackingFontSize == 1) ? 162 : 140);
             lv_draw_label_dsc_t lc;
             lv_draw_label_dsc_init(&lc);
             lc.font = trackingCallFont();
@@ -603,6 +638,12 @@ static void ac_draw_cb(lv_event_t *e) {
             la.color = ac.color;
             lv_area_t a2 = { a1.x1, (lv_coord_t)(a1.y1 + lineH * 2), a1.x2, (lv_coord_t)(a1.y1 + lineH * 3) };
             if (ac.altTxt[0]) lv_draw_label(d, &la, &a2, ac.altTxt, NULL);
+            lv_draw_label_dsc_t lr;
+            lv_draw_label_dsc_init(&lr);
+            lr.font = trackingDetailFont();
+            lr.color = s_cSoft;
+            lv_area_t a3 = { a1.x1, (lv_coord_t)(a1.y1 + lineH * 3), a1.x2, (lv_coord_t)(a1.y1 + lineH * 4) };
+            if (ac.routeTxt[0]) lv_draw_label(d, &lr, &a3, ac.routeTxt, NULL);
         }
     }
 }
@@ -894,8 +935,16 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
         d.distKm = (float)distKm;
         d.bearingDeg = (float)brg;
         d.squawk = ac.squawk;
+        d.routeTxt[0] = 0;
         if (ac.onGround) snprintf(d.altTxt, sizeof(d.altTxt), "GND");
         else             snprintf(d.altTxt, sizeof(d.altTxt), "%.0f ft", (double)ac.altBaro);
+        if (d.call[0]) {
+            char routeLine1[96] = "";
+            char routeLine2[96] = "";
+            if (route_get(d.hex, d.call, routeLine1, sizeof(routeLine1), routeLine2, sizeof(routeLine2))) {
+                compact_route_code_line(routeLine1, d.routeTxt, sizeof(d.routeTxt));
+            }
+        }
 
         const std::string key = ac.hex.c_str();
         present.insert(key);
