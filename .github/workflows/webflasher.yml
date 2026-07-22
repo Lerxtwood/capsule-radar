@@ -22,8 +22,6 @@ on:
     paths:
       - 'web/flash/**'
       - '.github/workflows/webflasher.yml'
-  release:
-    types: [published]
   workflow_dispatch:
 
 permissions:
