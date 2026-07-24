@@ -794,8 +794,11 @@ static void handleRoot() {
         "function mbgStatus(t){var o=document.getElementById('mbgstatus');if(!o)return;o.style.display='block';o.textContent=t;}"
         "function mbgBounds(lat,lon,km){var latD=(km/111.0)*1.08;var cosLat=Math.cos(lat*Math.PI/180);var lonD=latD/Math.max(0.15,Math.abs(cosLat));return[[lat-latD,lon-lonD],[lat+latD,lon+lonD]];}"
         "function mbgTint(src){var out=document.createElement('canvas');out.width=466;out.height=466;var ctx=out.getContext('2d',{willReadFrequently:true});ctx.drawImage(src,0,0,466,466);var img=ctx.getImageData(0,0,466,466),d=img.data;"
-        "for(var i=0;i<d.length;i+=4){var r=d[i],g=d[i+1],b=d[i+2],a=d[i+3];if(a===0)continue;var lum=0.299*r+0.587*g+0.114*b;d[i]=Math.max(0,Math.min(255,lum*0.72+r*0.10-8));d[i+1]=Math.max(0,Math.min(255,lum*0.82+g*0.16+4));d[i+2]=Math.max(0,Math.min(255,lum*0.74+b*0.08-6));}"
-        "ctx.putImageData(img,0,0);ctx.fillStyle='rgba(4,12,8,0.28)';ctx.fillRect(0,0,466,466);"
+        "for(var i=0;i<d.length;i+=4){var r=d[i],g=d[i+1],b=d[i+2],a=d[i+3];if(a===0)continue;var lum=0.299*r+0.587*g+0.114*b;"
+        "var nr=lum*0.22+r*0.78,ng=lum*0.22+g*0.78,nb=lum*0.22+b*0.78;"
+        "nr=nr*0.86+255*0.14;ng=ng*0.86+255*0.14;nb=nb*0.86+255*0.14;"
+        "d[i]=Math.max(0,Math.min(255,nr));d[i+1]=Math.max(0,Math.min(255,ng));d[i+2]=Math.max(0,Math.min(255,nb));}"
+        "ctx.putImageData(img,0,0);ctx.fillStyle='rgba(255,255,255,0.12)';ctx.fillRect(0,0,466,466);"
         "var grad=ctx.createRadialGradient(233,233,80,233,233,250);grad.addColorStop(0,'rgba(255,255,255,0)');grad.addColorStop(1,'rgba(0,0,0,0.18)');ctx.fillStyle=grad;ctx.fillRect(0,0,466,466);"
         "ctx.fillStyle='rgba(234,255,243,0.72)';ctx.font='10px sans-serif';ctx.textAlign='right';ctx.fillText('(c) OSM',458,460);return out;}"
         "function mbgBlob(canvas){return new Promise(function(res,rej){canvas.toBlob(function(b){if(b)res(b);else rej(new Error('Image encode failed'));},'image/jpeg',0.82);});}"
@@ -2035,6 +2038,7 @@ void setup() {
         radar::setSweepEnabled(g_showSweep);
         radar::setAirportsEnabled(g_showAirports);
         radar::setBackgroundEnabled(g_showMapBackground);
+        ui_set_map_background(g_showMapBackground);
         radar::setTrailLength(g_trailLen);
         radar::setTrackingFontSize(g_trackingFontSize);
         display::setRotation((uint8_t)g_rotation);

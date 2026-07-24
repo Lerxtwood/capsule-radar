@@ -10,4 +10,4 @@ void airports_project(double homeLat, double homeLon, double rangeKm,
                       float cx, float cy, float rOuterPx);
 
 void airports_draw(lv_draw_ctx_t *ctx, lv_color_t crossColor,
-                   lv_color_t labelColor, lv_opa_t opa);
+                   lv_color_t labelColor, lv_opa_t opa, bool mapReadable);

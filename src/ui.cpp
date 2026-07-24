@@ -26,6 +26,7 @@ static lv_obj_t *s_photoZoomScrim = nullptr, *s_photoZoom = nullptr;
 static lv_timer_t *s_previewTimer = nullptr;
 static bool s_autoPreview = false;
 static char s_lastRouteReq[24] = "";
+static lv_obj_t *s_hudTopPlate = nullptr, *s_hudDatePlate = nullptr;
 static lv_obj_t *s_hudWifi = nullptr, *s_hudCount = nullptr, *s_hudClock = nullptr, *s_hudBatt = nullptr, *s_hudDate = nullptr;
 static lv_obj_t *s_hudBars[4] = { nullptr, nullptr, nullptr, nullptr };   // WiFi signal-strength bars
 static lv_obj_t *s_list = nullptr;
@@ -42,6 +43,16 @@ static bool s_photoZoomShown = false;
 static char s_pendingPhotoZoomHex[10] = "";
 
 static void refresh_card(void);
+
+static void style_map_plate(lv_obj_t *obj, bool on, lv_coord_t radius = 10) {
+    if (!obj) return;
+    lv_obj_set_style_bg_color(obj, lv_color_hex(0x05100B), 0);
+    lv_obj_set_style_bg_opa(obj, on ? 118 : LV_OPA_TRANSP, 0);
+    lv_obj_set_style_radius(obj, radius, 0);
+    lv_obj_set_style_border_color(obj, lv_color_hex(0x8FD8BE), 0);
+    lv_obj_set_style_border_opa(obj, on ? 64 : LV_OPA_TRANSP, 0);
+    lv_obj_set_style_border_width(obj, on ? 1 : 0, 0);
+}
 
 // --------------------------------------------------------------------- units
 // 0 = Aviation (ft, kt, km) · 1 = Metric (m, km/h, km) · 2 = Imperial (ft, mph, mi).
@@ -511,6 +522,15 @@ void ui_set_date(const char *date) {
     if (s_hudDate && date) lv_label_set_text(s_hudDate, date);
 }
 
+void ui_set_map_background(bool enabled) {
+    style_map_plate(s_hudTopPlate, enabled, 12);
+    style_map_plate(s_hudDatePlate, enabled, 9);
+    if (s_hudDate) {
+        lv_obj_set_style_text_color(s_hudDate, enabled ? lv_color_white() : UI_INK, 0);
+        lv_obj_set_style_text_opa(s_hudDate, enabled ? LV_OPA_COVER : 140, 0);
+    }
+}
+
 void ui_set_netinfo(const char *line) {
     if (s_statsNet && line) lv_label_set_text(s_statsNet, line);
 }
@@ -907,6 +927,13 @@ void ui_create(void) {
 
     // top status HUD (wifi / aircraft count / clock); white reads on both themes.
     // WiFi is a 4-bar signal meter: bar count = RSSI strength, colour = feed health.
+    s_hudTopPlate = lv_obj_create(s_tileRadar);
+    lv_obj_remove_style_all(s_hudTopPlate);
+    lv_obj_set_size(s_hudTopPlate, 246, 24);
+    lv_obj_align(s_hudTopPlate, LV_ALIGN_TOP_MID, 0, 45);
+    lv_obj_clear_flag(s_hudTopPlate, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    style_map_plate(s_hudTopPlate, false, 12);
+
     s_hudWifi = lv_obj_create(s_tileRadar);
     lv_obj_remove_style_all(s_hudWifi);
     lv_obj_set_size(s_hudWifi, 21, 14);
@@ -947,12 +974,20 @@ void ui_create(void) {
     lv_label_set_text(s_hudBatt, "");
     lv_obj_align(s_hudBatt, LV_ALIGN_TOP_MID, 92, 50);
 
+    s_hudDatePlate = lv_obj_create(s_tileRadar);
+    lv_obj_remove_style_all(s_hudDatePlate);
+    lv_obj_set_size(s_hudDatePlate, 104, 18);
+    lv_obj_align(s_hudDatePlate, LV_ALIGN_TOP_MID, 0, 67);
+    lv_obj_clear_flag(s_hudDatePlate, LV_OBJ_FLAG_SCROLLABLE | LV_OBJ_FLAG_CLICKABLE);
+    style_map_plate(s_hudDatePlate, false, 9);
+
     s_hudDate = lv_label_create(s_tileRadar);
     lv_obj_set_style_text_font(s_hudDate, &lv_font_montserrat_12, 0);
     lv_obj_set_style_text_color(s_hudDate, UI_INK, 0);
     lv_obj_set_style_text_opa(s_hudDate, 140, 0);
     lv_label_set_text(s_hudDate, "");
     lv_obj_align(s_hudDate, LV_ALIGN_TOP_MID, 0, 70);
+    ui_set_map_background(radar::backgroundEnabled());
 
     // --- list tile (circular panel, clipped to the round screen) ---
     lv_obj_t *lp = make_round_panel(s_tileList);

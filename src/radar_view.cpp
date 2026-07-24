@@ -322,8 +322,8 @@ static void grid_draw_cb(lv_event_t *e) {
         td.border_opa = 160;
         if (!radar_mapbg::active()) {
             coastline_draw(d, COAST_COLOR, 170, 2);    // landmass outline under the triangle
-            if (s_airportsEnabled) airports_draw(d, AIRPORT_CROSS_COLOR, AIRPORT_LABEL_COLOR, 235);
         }
+        if (s_airportsEnabled) airports_draw(d, AIRPORT_CROSS_COLOR, AIRPORT_LABEL_COLOR, 235, radar_mapbg::active());
         lv_draw_polygon(d, &td, tri, 3);
         return;
     }
@@ -332,8 +332,8 @@ static void grid_draw_cb(lv_event_t *e) {
     // Steel blue + 2 px so it reads as a map outline, distinct from the green altitude trails.
     if (!radar_mapbg::active()) {
         coastline_draw(d, COAST_COLOR, 165, 2);
-        if (s_airportsEnabled) airports_draw(d, AIRPORT_CROSS_COLOR, AIRPORT_LABEL_COLOR, 235);
     }
+    if (s_airportsEnabled) airports_draw(d, AIRPORT_CROSS_COLOR, AIRPORT_LABEL_COLOR, 235, radar_mapbg::active());
 
     // phosphor: concentric rings + crosshair
     lv_draw_arc_dsc_t ad;
@@ -576,9 +576,68 @@ static void draw_offrange(lv_draw_ctx_t *d, const AcDraw &ac) {
     lv_draw_polygon(d, &td, tri, 3);
 }
 
+static int map_label_line_width(const char *txt, const lv_font_t *font) {
+    if (!txt || !txt[0] || !font) return 0;
+    lv_point_t size = {0, 0};
+    lv_txt_get_size(&size, txt, font, 0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    return (int)size.x;
+}
+
+static int map_label_backplate_width(const AcDraw &ac) {
+    int w = 0;
+    w = LV_MAX(w, map_label_line_width(ac.call, trackingCallFont()));
+    w = LV_MAX(w, map_label_line_width(ac.type, trackingDetailFont()));
+    w = LV_MAX(w, map_label_line_width(ac.altTxt, trackingDetailFont()));
+    w = LV_MAX(w, map_label_line_width(ac.routeTxt, trackingDetailFont()));
+    return w;
+}
+
+static void draw_map_label_backplate(lv_draw_ctx_t *d, const AcDraw &ac,
+                                     int lineH, int topY) {
+    lv_draw_rect_dsc_t bg;
+    lv_draw_rect_dsc_init(&bg);
+    bg.bg_color = lv_color_hex(0x05100B);
+    bg.bg_opa = 118;
+    bg.radius = 10;
+    bg.border_color = lv_color_hex(0x8FD8BE);
+    bg.border_opa = 64;
+    bg.border_width = 1;
+    bg.outline_opa = LV_OPA_TRANSP;
+
+    const int contentW = map_label_backplate_width(ac);
+    const int width = LV_MAX(contentW + 12, 58);
+    const int height = ac.routeTxt[0] ? lineH * 4 + 6 : lineH * 3 + 6;
+    lv_area_t r = {
+        (lv_coord_t)(ac.pos.x + 8),
+        (lv_coord_t)(ac.pos.y + topY - 3),
+        (lv_coord_t)(ac.pos.x + 8 + width),
+        (lv_coord_t)(ac.pos.y + topY - 3 + height)
+    };
+    lv_draw_rect(d, &bg, &r);
+}
+
+static void draw_map_marker_halo(lv_draw_ctx_t *d, const AcDraw &ac) {
+    lv_draw_rect_dsc_t halo;
+    lv_draw_rect_dsc_init(&halo);
+    halo.bg_color = lv_color_hex(0x07140E);
+    halo.bg_opa = 132;
+    halo.radius = LV_RADIUS_CIRCLE;
+    halo.border_width = 1;
+    halo.border_opa = 90;
+    halo.border_color = ac.emergency ? COL_EMERG : s_cSoft;
+    lv_area_t r = {
+        (lv_coord_t)(ac.pos.x - 12),
+        (lv_coord_t)(ac.pos.y - 12),
+        (lv_coord_t)(ac.pos.x + 12),
+        (lv_coord_t)(ac.pos.y + 12)
+    };
+    lv_draw_rect(d, &halo, &r);
+}
+
 static void ac_draw_cb(lv_event_t *e) {
     lv_draw_ctx_t *d = lv_event_get_draw_ctx(e);
     const bool drg = orb();
+    const bool mapActive = radar_mapbg::active();
     int balls = 0, arrows = 0;
 
     for (const AcDraw &ac : s_acs) {
@@ -597,6 +656,7 @@ static void ac_draw_cb(lv_event_t *e) {
         } else {
             if (!ac.inRange) continue;            // phosphor shows in-range traffic only
             draw_trail(d, ac, ac.color);
+            if (mapActive) draw_map_marker_halo(d, ac);
             const float th = ((ac.track != ac.track) ? 0.0f : ac.track) * (float)M_PI / 180.0f;
             const float c = cosf(th), s = sinf(th);
             lv_point_t pts[4];
@@ -640,6 +700,7 @@ static void ac_draw_cb(lv_event_t *e) {
             const int lineH = trackingLineH();
             const int topY = -28 - (s_trackingFontSize * 4);
             const int labelW = (s_trackingFontSize == 2) ? 176 : ((s_trackingFontSize == 1) ? 162 : 140);
+            if (mapActive) draw_map_label_backplate(d, ac, lineH, topY);
             lv_draw_label_dsc_t lc;
             lv_draw_label_dsc_init(&lc);
             lc.font = trackingCallFont();

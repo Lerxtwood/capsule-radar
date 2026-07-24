@@ -11,6 +11,7 @@ void ui_set_battery(int pct, bool charging, bool present);  // top HUD battery i
 void ui_set_date(const char *date);  // top HUD date line (e.g. "08 Jun 2026")
 void ui_set_netinfo(const char *line);  // stats view footer: how to reach the config page
 void ui_set_gps(int state, int sats);   // GPS indicator: state 0=off/hidden 1=acquiring 2=fix; HUD icon + Stats line
+void ui_set_map_background(bool enabled); // toggle extra HUD readability plates when the radar map is on
 void ui_splash_show(void);  // branded boot splash (auto-fades, covers init time)
 void ui_set_range_cb(void (*cb)(float km));  // on-screen zoom button -> notify main
 void ui_set_app_switch_cb(void (*cb)(void)); // top-center radar tap -> notify main
