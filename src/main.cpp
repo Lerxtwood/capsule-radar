@@ -74,6 +74,7 @@ static esp_ota_handle_t      g_updateOtaHandle = 0;                  // fixed-sl
 static const esp_partition_t *g_updateOtaPartition = nullptr;
 static bool                  g_updateUploadOk = false;
 static bool                  g_showAirports = true;                  // airport markers on/off (web/NVS)
+static bool                  g_showMapBackground = false;            // show cached static map under the radar scope
 static int                   g_rotation = 0;                         // display rotation 0/1/2/3 = 0/90/180/270 (web/NVS)
 static int                   g_rotationOffset = 0;                   // fine display rotation adjustment, degrees (web/NVS)
 static bool                  g_useGps = false;                       // auto-set home from the LC76G GPS (-G variant) (web/NVS)
@@ -600,7 +601,7 @@ static void handleRoot() {
         "</style></head><body>"
         "<div class=hd><div class=dot></div><div><h1>Capsule Radar</h1><p class=sub>Live ADS-B radar &middot; configuration</p></div></div>"
         "<nav class=nav><a class=on href=/>Capsule-Radar</a><a href=/tamapoke>TamaPoke</a><a href=/sprites>Sprites</a><a href=/update>Firmware</a></nav>"
-        "<div class=card><div class=t>Location &amp; range</div><form method=POST action=/save>"
+        "<div class=card><div class=t>Location &amp; range</div><form id=cfg method=POST action=/save onsubmit='return saveCfg(event)'>"
         "<label>Center point &mdash; tap the map or drag the pin</label>"
         "<div id=map></div>"
         "<label>Center latitude</label><input id=lat name=lat value='%.5f'>"
@@ -609,11 +610,10 @@ static void handleRoot() {
         "<label>Display range</label><select name=range>%s</select>"
         "<label>Theme</label><select name=theme>%s</select>"
         "<label>Time zone</label><select name=tz>%s</select>"
-        "<button>Save &amp; restart</button></form></div>"
-        "<div class=card><div class=t>Map Background</div>"
-        "<p style='color:#9affc8;font-size:13px;margin:0 0 8px'>Experimental: generate muted static map backgrounds for the supported radar ranges and upload them to the device. When available, these replace the coastline and airport overlays.</p>"
-        "<button type=button class=sec id=mbgbtn onclick='mbg()'>Generate radar map backgrounds</button>"
-        "<pre id=mbgstatus style='white-space:pre-wrap;color:#9affc8;background:#041008;border:1px solid #244b35;border-radius:10px;padding:10px;min-height:72px;margin-top:12px'>Ready.</pre></div>"
+        "<label><input id=mapbg type=checkbox class=ck name=mapbg value=1 %s>Display background map</label>"
+        "<p style='color:#6f8c7d;font-size:12px;margin:6px 0 0'>When enabled, saving this page automatically generates and uploads muted map backgrounds for the five radar zoom levels.</p>"
+        "<pre id=mbgstatus style='display:none;white-space:pre-wrap;color:#9affc8;background:#041008;border:1px solid #244b35;border-radius:10px;padding:10px;min-height:72px;margin-top:12px'>Preparing map backgrounds…</pre>"
+        "<button id=savebtn>Save &amp; restart</button></form></div>"
         "<div class=card><div class=t>Display</div>"
         "<label>Brightness</label>"
         "<input type=range min=5 max=255 value='%d' oninput='b(this.value,0)' onchange='b(this.value,1)'>"
@@ -669,9 +669,11 @@ static void handleRoot() {
         "function al(v){fetch('/alerts?mode='+v+'&save=1')}"
         "function px(v){fetch('/alerts?prox='+v+'&save=1')}"
         "function gp(c){fetch('/gps?v='+(c?1:0)+'&save=1')}"
+        "const MBG_ENABLED=%d;"
+        "const MBG_ORIG_LAT=%.5f,MBG_ORIG_LON=%.5f;"
         "const MBG_RANGES_NM=[5,11,16,27,54];"
         "function nmToKm(nm){return nm*1.852;}"
-        "function mbgStatus(t){var o=document.getElementById('mbgstatus');if(o)o.textContent=t;}"
+        "function mbgStatus(t){var o=document.getElementById('mbgstatus');if(!o)return;o.style.display='block';o.textContent=t;}"
         "function mbgBounds(lat,lon,km){var latD=(km/111.0)*1.08;var cosLat=Math.cos(lat*Math.PI/180);var lonD=latD/Math.max(0.15,Math.abs(cosLat));return[[lat-latD,lon-lonD],[lat+latD,lon+lonD]];}"
         "function mbgTint(src){var out=document.createElement('canvas');out.width=466;out.height=466;var ctx=out.getContext('2d',{willReadFrequently:true});ctx.drawImage(src,0,0,466,466);var img=ctx.getImageData(0,0,466,466),d=img.data;"
         "for(var i=0;i<d.length;i+=4){var r=d[i],g=d[i+1],b=d[i+2],a=d[i+3];if(a===0)continue;var lum=0.299*r+0.587*g+0.114*b;d[i]=Math.max(0,Math.min(255,lum*0.72+r*0.10-8));d[i+1]=Math.max(0,Math.min(255,lum*0.82+g*0.16+4));d[i+2]=Math.max(0,Math.min(255,lum*0.74+b*0.08-6));}"
@@ -685,11 +687,15 @@ static void handleRoot() {
         "var layer=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,crossOrigin:'anonymous'}).addTo(map);map.fitBounds(mbgBounds(lat,lon,nmToKm(rangeNm)),{animate:false,padding:[0,0]});await mbgWaitTiles(layer);"
         "var canvas=await new Promise(function(res,rej){leafletImage(map,function(err,c){if(err)rej(err);else res(c);});});map.remove();return mbgTint(canvas);}"
         "async function mbgUpload(rangeNm,blob){var fd=new FormData();fd.append('file',blob,'radarbg_'+rangeNm+'nm.jpg');var r=await fetch('/mapbg/upload?range='+encodeURIComponent(rangeNm),{method:'POST',body:fd});if(!r.ok)throw new Error(await r.text());}"
-        "async function mbg(){var btn=document.getElementById('mbgbtn');if(btn)btn.disabled=true;try{var lat=parseFloat(document.getElementById('lat').value),lon=parseFloat(document.getElementById('lon').value);if(!isFinite(lat)||!isFinite(lon))throw new Error('Latitude/longitude are invalid');"
+        "async function mbg(){var btn=document.getElementById('savebtn');if(btn)btn.disabled=true;try{var lat=parseFloat(document.getElementById('lat').value),lon=parseFloat(document.getElementById('lon').value);if(!isFinite(lat)||!isFinite(lon))throw new Error('Latitude/longitude are invalid');"
         "for(var i=0;i<MBG_RANGES_NM.length;i++){var nm=MBG_RANGES_NM[i];mbgStatus('Generating background '+(i+1)+'/'+MBG_RANGES_NM.length+' for '+nm+' nm...');var canvas=await mbgRenderRange(lat,lon,nm);var blob=await mbgBlob(canvas);mbgStatus('Uploading background '+(i+1)+'/'+MBG_RANGES_NM.length+' for '+nm+' nm...');await mbgUpload(nm,blob);}"
         "mbgStatus('Done. Uploaded '+MBG_RANGES_NM.length+' range-specific radar map backgrounds.');}"
         "catch(e){mbgStatus('Map background generation failed: '+e.message+'\\n\\nThis proof of concept depends on browser-side map export. If the tile server or browser blocks canvas export, we will need a different image source.');}"
         "finally{if(btn)btn.disabled=false;}}"
+        "async function saveCfg(ev){ev.preventDefault();var cb=document.getElementById('mapbg');var lat=parseFloat(document.getElementById('lat').value),lon=parseFloat(document.getElementById('lon').value);"
+        "var needMap=cb&&cb.checked&&( !MBG_ENABLED || Math.abs(lat-MBG_ORIG_LAT)>0.00001 || Math.abs(lon-MBG_ORIG_LON)>0.00001 );"
+        "if(needMap){try{await mbg();}catch(_){return false;}}"
+        "ev.target.submit();return false;}"
         // auto-pick the visitor's time zone from their browser clock (only if they haven't set one)
         "var TZSET=%d;(function(){if(TZSET)return;"
         "var d=new Date(),j=new Date(d.getFullYear(),0,1).getTimezoneOffset(),"
@@ -700,13 +706,17 @@ static void handleRoot() {
         "if(b>=0)e.selectedIndex=b;})();</script></body></html>",
         g_settings.homeLat, g_settings.homeLon, gpsRow.c_str(), ropts.c_str(), topts.c_str(),
         tzopts.c_str(),
+        g_showMapBackground ? "checked" : "",
         g_brightnessDay, iopts.c_str(),
         g_showSweep ? "checked" : "", g_prefetchDetails ? "checked" : "",
         g_genericPhotos ? "checked" : "",
-        g_showAirports ? "checked" : "", tlopts.c_str(), tfopts.c_str(), rotopts.c_str(), g_rotationOffset, uopts.c_str(),
+        g_showAirports ? "checked" : "",
+        tlopts.c_str(), tfopts.c_str(), rotopts.c_str(), g_rotationOffset, uopts.c_str(),
         g_volume, g_muted ? "checked" : "", g_quietHours ? "checked" : "",
         quietStart, quietEnd, aopts.c_str(), popts.c_str(),
-        g_settings.homeLat, g_settings.homeLon, (g_tz == TZ_STR ? 0 : 1));
+        g_settings.homeLat, g_settings.homeLon,
+        g_showMapBackground ? 1 : 0, g_settings.homeLat, g_settings.homeLon,
+        (g_tz == TZ_STR ? 0 : 1));
     if (written < 0 || (size_t)written >= BUFSZ) {
         Serial.printf("[web] config page truncated (%d bytes, buffer=%u)\n", written, (unsigned)BUFSZ);
     }
@@ -727,6 +737,7 @@ static void handleSave() {
     }
     if (g_web.hasArg("range")) p.putFloat("rangeKm", g_web.arg("range").toFloat());
     if (g_web.hasArg("theme")) p.putInt("theme", g_web.arg("theme").toInt());
+    p.putBool("mapbg", g_web.hasArg("mapbg"));
     if (g_web.hasArg("tz")) {
         const int i = g_web.arg("tz").toInt();
         if (i >= 0 && i < TZOPTS_N) p.putString("tz", TZOPTS[i].tz);
@@ -1897,12 +1908,14 @@ void setup() {
         const int t = p.getInt("theme", THEME_PHOSPHOR);
         g_showSweep = p.getBool("sweep", true);
         g_showAirports = p.getBool("airports", true);
+        g_showMapBackground = p.getBool("mapbg", false);
         g_rotation = p.getInt("rot", 0);
         g_rotationOffset = constrain(p.getInt("rotoff", 0), -45, 45);
         p.end();
         radar::setTheme(t);
         radar::setSweepEnabled(g_showSweep);
         radar::setAirportsEnabled(g_showAirports);
+        radar::setBackgroundEnabled(g_showMapBackground);
         radar::setTrailLength(g_trailLen);
         radar::setTrackingFontSize(g_trackingFontSize);
         display::setRotation((uint8_t)g_rotation);

@@ -763,6 +763,12 @@ void setAirportsEnabled(bool on) {
 }
 bool airportsEnabled() { return s_airportsEnabled; }
 
+void setBackgroundEnabled(bool on) {
+    radar_mapbg::set_enabled(on);
+    if (s_gridLayer) lv_obj_invalidate(s_gridLayer);
+}
+bool backgroundEnabled() { return radar_mapbg::enabled(); }
+
 // 0 = off, 1 = short, 2 = medium (default), 3 = long. Controls both the per-aircraft
 // trail and the persistent flow layer (the long-lived "where everything has been" tracks).
 void setTrailLength(int level) {

@@ -7,6 +7,8 @@ namespace radar_mapbg {
 bool begin(void *lv_parent);
 bool load_for_range(float range_km);
 void reload_current();
+void set_enabled(bool enabled);
+bool enabled();
 bool active();
 bool has_any();
 

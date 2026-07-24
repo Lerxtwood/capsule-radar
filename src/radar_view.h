@@ -72,6 +72,8 @@ void setSweepEnabled(bool on);                   // show/hide the rotating sweep
 bool sweepEnabled();
 void setAirportsEnabled(bool on);                // show/hide airport markers on the scope
 bool airportsEnabled();
+void setBackgroundEnabled(bool on);              // show/hide the cached static map background
+bool backgroundEnabled();
 void setTrailLength(int level);                  // 0=off 1=short 2=medium 3=long (aircraft trails + flow)
 void setTrackingFontSize(int level);             // 0=small 1=medium 2=large aircraft floating labels
 int  trackingFontSize();

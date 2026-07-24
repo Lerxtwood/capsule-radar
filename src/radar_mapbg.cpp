@@ -28,6 +28,7 @@ static lv_obj_t *s_canvas = nullptr;
 static lv_color_t *s_buf = nullptr;
 static int s_loadedBucket = -1;
 static int s_requestedBucket = -1;
+static bool s_enabled = false;
 static bool s_active = false;
 
 static lv_color_t *s_decodeDst = nullptr;
@@ -123,6 +124,13 @@ bool begin(void *lv_parent) {
 }
 
 bool load_for_range(float range_km) {
+    if (!s_enabled) {
+        s_requestedBucket = nearest_range_bucket(range_km);
+        s_loadedBucket = -1;
+        set_visible(false);
+        return false;
+    }
+
     const int bucket = nearest_range_bucket(range_km);
     s_requestedBucket = bucket;
     if (s_loadedBucket == bucket && s_active) return true;
@@ -151,6 +159,15 @@ void reload_current() {
     load_for_range((float)s_requestedBucket);
 }
 
+void set_enabled(bool enabled) {
+    s_enabled = enabled;
+    if (!enabled) {
+        s_loadedBucket = -1;
+        set_visible(false);
+    }
+}
+
+bool enabled() { return s_enabled; }
 bool active() { return s_active; }
 
 bool has_any() {
