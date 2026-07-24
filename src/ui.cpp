@@ -284,8 +284,11 @@ static void (*s_rangeCb)(float) = nullptr;
 static void (*s_appSwitchCb)(void) = nullptr;
 static void (*s_firmwareSwitchCb)(void) = nullptr;
 static lv_obj_t *s_zoomBtn = nullptr, *s_zoomLbl = nullptr;
+static lv_obj_t *s_zoomFlashLeft = nullptr, *s_zoomFlashRight = nullptr;
 static lv_obj_t *s_tamaBtn = nullptr, *s_tamaLbl = nullptr, *s_printerBtn = nullptr, *s_printerLbl = nullptr;
 static constexpr lv_coord_t RANGE_TOUCH_STRIP_PX = 10;   // require a touch in the very bottom strip
+enum ZoomTapSide : uint8_t { ZOOM_TAP_NONE = 0, ZOOM_TAP_LEFT, ZOOM_TAP_RIGHT };
+static ZoomTapSide s_zoomTapSide = ZOOM_TAP_NONE;
 
 static bool range_touch_active() {
     lv_indev_t *indev = lv_indev_get_act();
@@ -293,6 +296,37 @@ static bool range_touch_active() {
     lv_point_t p;
     lv_indev_get_point(indev, &p);
     return p.y >= SCREEN_H - RANGE_TOUCH_STRIP_PX;
+}
+
+static ZoomTapSide zoom_touch_side() {
+    lv_indev_t *indev = lv_indev_get_act();
+    if (!indev || !s_zoomBtn) return ZOOM_TAP_NONE;
+    lv_point_t p;
+    lv_area_t a;
+    lv_indev_get_point(indev, &p);
+    if (p.y < SCREEN_H - RANGE_TOUCH_STRIP_PX) return ZOOM_TAP_NONE;
+    lv_obj_get_coords(s_zoomBtn, &a);
+    if (p.x < a.x1 || p.x > a.x2 || p.y < a.y1 || p.y > a.y2) return ZOOM_TAP_NONE;
+    const lv_coord_t mid = a.x1 + (lv_area_get_width(&a) / 2);
+    return (p.x < mid) ? ZOOM_TAP_LEFT : ZOOM_TAP_RIGHT;
+}
+
+static void set_zoom_highlight(ZoomTapSide side) {
+    if (s_zoomFlashLeft) {
+        if (side == ZOOM_TAP_LEFT) lv_obj_clear_flag(s_zoomFlashLeft, LV_OBJ_FLAG_HIDDEN);
+        else                       lv_obj_add_flag(s_zoomFlashLeft, LV_OBJ_FLAG_HIDDEN);
+    }
+    if (s_zoomFlashRight) {
+        if (side == ZOOM_TAP_RIGHT) lv_obj_clear_flag(s_zoomFlashRight, LV_OBJ_FLAG_HIDDEN);
+        else                        lv_obj_add_flag(s_zoomFlashRight, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void refresh_zoom_label() {
+    if (!s_zoomLbl) return;
+    char b[28];
+    snprintf(b, sizeof(b), "- %.0f%s +", dist_val(s_rangeKm), dist_unit());
+    lv_label_set_text(s_zoomLbl, b);
 }
 
 void ui_set_range_cb(void (*cb)(float)) { s_rangeCb = cb; }
@@ -306,39 +340,40 @@ static bool radar_top_center_point(lv_point_t p) {
 static void zoom_btn_cb(lv_event_t *e) {
     const lv_event_code_t code = lv_event_get_code(e);
     if (code == LV_EVENT_PRESSED) {
-        if (range_touch_active()) {
-            if (s_zoomBtn) lv_obj_set_style_bg_color(s_zoomBtn, UI_GREEN, 0);
-            if (s_zoomLbl) lv_obj_set_style_text_color(s_zoomLbl, lv_color_black(), 0);
-        } else {
-            if (s_zoomBtn) lv_obj_set_style_bg_color(s_zoomBtn, UI_PANEL, 0);
-            if (s_zoomLbl) lv_obj_set_style_text_color(s_zoomLbl, UI_GREEN, 0);
+        s_zoomTapSide = zoom_touch_side();
+        set_zoom_highlight(s_zoomTapSide);
+        if (s_zoomLbl) {
+            const lv_color_t txt = (s_zoomTapSide == ZOOM_TAP_NONE) ? UI_GREEN : lv_color_black();
+            lv_obj_set_style_text_color(s_zoomLbl, txt, 0);
         }
     } else if (code == LV_EVENT_CLICKED) {
         static uint32_t last = 0;
-        if (range_touch_active()) {
+        if (s_zoomTapSide != ZOOM_TAP_NONE) {
             const uint32_t now = lv_tick_get();
             if (now - last >= 250 && s_rangeCb) {
                 last = now;
                 const int n = (int)(sizeof(RANGE_STEPS_KM) / sizeof(RANGE_STEPS_KM[0]));
-                s_rangeIdx = (s_rangeIdx + 1) % n;
+                if (s_zoomTapSide == ZOOM_TAP_LEFT) s_rangeIdx = (s_rangeIdx + n - 1) % n;
+                else if (s_zoomTapSide == ZOOM_TAP_RIGHT) s_rangeIdx = (s_rangeIdx + 1) % n;
                 s_rangeCb(RANGE_STEPS_KM[s_rangeIdx]);
             }
         }
-        if (s_zoomBtn) lv_obj_set_style_bg_color(s_zoomBtn, UI_PANEL, 0);
+        set_zoom_highlight(ZOOM_TAP_NONE);
+        s_zoomTapSide = ZOOM_TAP_NONE;
         if (s_zoomLbl) lv_obj_set_style_text_color(s_zoomLbl, UI_GREEN, 0);
-    } else if (code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
-        if (s_zoomBtn) lv_obj_set_style_bg_color(s_zoomBtn, UI_PANEL, 0);
+    } else if (code == LV_EVENT_RELEASED) {
+        set_zoom_highlight(ZOOM_TAP_NONE);
+        if (s_zoomLbl) lv_obj_set_style_text_color(s_zoomLbl, UI_GREEN, 0);
+    } else if (code == LV_EVENT_PRESS_LOST) {
+        set_zoom_highlight(ZOOM_TAP_NONE);
+        s_zoomTapSide = ZOOM_TAP_NONE;
         if (s_zoomLbl) lv_obj_set_style_text_color(s_zoomLbl, UI_GREEN, 0);
     }
 }
 
 void ui_set_range_km(float km) {
     s_rangeKm = km;
-    if (s_zoomLbl) {
-        char b[20];
-        snprintf(b, sizeof(b), "%.0f %s", dist_val(km), dist_unit());
-        lv_label_set_text(s_zoomLbl, b);
-    }
+    refresh_zoom_label();
     int best = 0; float bd = 1e9f;                 // sync the cycle index to the shown range
     const int n = (int)(sizeof(RANGE_STEPS_KM) / sizeof(RANGE_STEPS_KM[0]));
     for (int i = 0; i < n; ++i) { float d = km - RANGE_STEPS_KM[i]; if (d < 0) d = -d; if (d < bd) { bd = d; best = i; } }
@@ -836,7 +871,7 @@ void ui_create(void) {
     // on-screen range/zoom button. Keep the touch target tight and low so taps on
     // nearby aircraft don't accidentally change range.
     s_zoomBtn = lv_btn_create(s_tileRadar);
-    lv_obj_set_size(s_zoomBtn, 74, 24);
+    lv_obj_set_size(s_zoomBtn, 118, 24);
     lv_obj_set_ext_click_area(s_zoomBtn, 0);
     lv_obj_align(s_zoomBtn, LV_ALIGN_BOTTOM_MID, 0, -4);
     lv_obj_set_style_radius(s_zoomBtn, 12, 0);
@@ -847,11 +882,28 @@ void ui_create(void) {
     lv_obj_set_style_border_opa(s_zoomBtn, 170, 0);
     lv_obj_clear_flag(s_zoomBtn, LV_OBJ_FLAG_SCROLL_CHAIN);  // tapping it must not swipe the tileview
     lv_obj_add_event_cb(s_zoomBtn, zoom_btn_cb, LV_EVENT_ALL, nullptr);
+    s_zoomFlashLeft = lv_obj_create(s_zoomBtn);
+    lv_obj_remove_style_all(s_zoomFlashLeft);
+    lv_obj_set_size(s_zoomFlashLeft, 58, 22);
+    lv_obj_align(s_zoomFlashLeft, LV_ALIGN_LEFT_MID, 1, 0);
+    lv_obj_set_style_radius(s_zoomFlashLeft, 11, 0);
+    lv_obj_set_style_bg_color(s_zoomFlashLeft, UI_GREEN, 0);
+    lv_obj_set_style_bg_opa(s_zoomFlashLeft, LV_OPA_COVER, 0);
+    lv_obj_add_flag(s_zoomFlashLeft, LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_CLICKABLE);
+    s_zoomFlashRight = lv_obj_create(s_zoomBtn);
+    lv_obj_remove_style_all(s_zoomFlashRight);
+    lv_obj_set_size(s_zoomFlashRight, 58, 22);
+    lv_obj_align(s_zoomFlashRight, LV_ALIGN_RIGHT_MID, -1, 0);
+    lv_obj_set_style_radius(s_zoomFlashRight, 11, 0);
+    lv_obj_set_style_bg_color(s_zoomFlashRight, UI_GREEN, 0);
+    lv_obj_set_style_bg_opa(s_zoomFlashRight, LV_OPA_COVER, 0);
+    lv_obj_add_flag(s_zoomFlashRight, LV_OBJ_FLAG_HIDDEN | LV_OBJ_FLAG_CLICKABLE);
     s_zoomLbl = lv_label_create(s_zoomBtn);
-    lv_label_set_text(s_zoomLbl, "30 km");
+    lv_label_set_text(s_zoomLbl, "- 16nm +");
     lv_obj_set_style_text_font(s_zoomLbl, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_color(s_zoomLbl, UI_GREEN, 0);
     lv_obj_center(s_zoomLbl);
+    lv_obj_move_foreground(s_zoomLbl);
 
     // top status HUD (wifi / aircraft count / clock); white reads on both themes.
     // WiFi is a 4-bar signal meter: bar count = RSSI strength, colour = feed health.
