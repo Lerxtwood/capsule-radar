@@ -517,13 +517,6 @@ static void handleRoot() {
         snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == g_trackingFontSize ? " selected" : "", tfnames[i]);
         tfopts += o;
     }
-    const char *appnames[] = {"Capsule Radar", "TamaPoke"};
-    String appopts;
-    for (int i = 0; i < 2; ++i) {
-        char o[80];
-        snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == g_appMode ? " selected" : "", appnames[i]);
-        appopts += o;
-    }
     const char *anames[] = {"Off", "Emergencies only", "New aircraft + emergencies"};
     String aopts;
     for (int i = 0; i < 3; ++i) {
@@ -613,7 +606,6 @@ static void handleRoot() {
         "<label>Brightness</label>"
         "<input type=range min=5 max=255 value='%d' oninput='b(this.value,0)' onchange='b(this.value,1)'>"
         "<label>Dim screen after</label><select onchange='d(this.value)'>%s</select>"
-        "<label>Active app</label><select onchange='app(this.value)'>%s</select>"
         "<label><input type=checkbox class=ck %s onchange='sw(this.checked)'>Show radar sweep</label>"
         "<label><input type=checkbox class=ck %s onchange='pf(this.checked)'>Preload aircraft details</label>"
         "<label><input type=checkbox class=ck %s onchange='gf(this.checked)'>Use generic aircraft photos</label>"
@@ -653,7 +645,6 @@ static void handleRoot() {
         "function qh(){fetch('/vol?quiet='+(document.getElementById('quiet').checked?1:0)+'&qstart='+document.getElementById('qs').value+'&qend='+document.getElementById('qe').value+'&save=1')}"
         "function t(){fetch('/vol?test=1')}"
         "function d(v){fetch('/idle?v='+v+'&save=1')}"
-        "function app(v){fetch('/app?v='+v+'&save=1')}"
         "function sw(c){fetch('/sweep?v='+(c?1:0)+'&save=1')}"
         "function pf(c){fetch('/prefetch?v='+(c?1:0)+'&save=1')}"
         "function gf(c){fetch('/generic-photos?v='+(c?1:0)+'&save=1')}"
@@ -676,7 +667,7 @@ static void handleRoot() {
         "if(b>=0)e.selectedIndex=b;})();</script></body></html>",
         g_settings.homeLat, g_settings.homeLon, gpsRow.c_str(), ropts.c_str(), topts.c_str(),
         tzopts.c_str(),
-        g_brightnessDay, iopts.c_str(), appopts.c_str(),
+        g_brightnessDay, iopts.c_str(),
         g_showSweep ? "checked" : "", g_prefetchDetails ? "checked" : "",
         g_genericPhotos ? "checked" : "",
         g_showAirports ? "checked" : "", tlopts.c_str(), tfopts.c_str(), rotopts.c_str(), g_rotationOffset, uopts.c_str(),

@@ -399,10 +399,26 @@ static void wedge_bbox(float deg, lv_area_t *out) {
 }
 
 // glyph + label bounding box (for partial invalidation during the glide)
-static inline lv_area_t glyph_bbox(lv_point_t p) {
+static inline lv_area_t glyph_bbox(const AcDraw &ac, lv_point_t p) {
     lv_area_t a;
-    if (orb()) { a.x1 = p.x - 30; a.y1 = p.y - 30; a.x2 = p.x + 30;  a.y2 = p.y + 30; }
-    else          { a.x1 = p.x - 22; a.y1 = p.y - 22; a.x2 = p.x + 148; a.y2 = p.y + 26; }
+    if (orb()) {
+        a.x1 = p.x - 30;
+        a.y1 = p.y - 30;
+        a.x2 = p.x + 30;
+        a.y2 = p.y + 30;
+        return a;
+    }
+
+    const int lineH = trackingLineH();
+    const int topY = -28 - (s_trackingFontSize * 4);
+    const int labelW = (s_trackingFontSize == 2) ? 176 : ((s_trackingFontSize == 1) ? 162 : 140);
+    const int lines = ac.routeTxt[0] ? 4 : 3;
+    const int pad = 8;
+
+    a.x1 = p.x - 22;
+    a.y1 = (lv_coord_t)(p.y + topY - pad);
+    a.x2 = (lv_coord_t)(p.x + 12 + labelW + pad);
+    a.y2 = (lv_coord_t)(p.y + topY + lineH * lines + pad);
     return a;
 }
 static inline void area_union(lv_area_t &d, const lv_area_t &s) {
@@ -425,8 +441,8 @@ static void interp_step(void) {
         const lv_coord_t ny = ac.from.y + (lv_coord_t)lroundf((float)(ac.to.y - ac.from.y) * e);
         if (nx == ac.pos.x && ny == ac.pos.y) continue;
         lv_point_t np; np.x = nx; np.y = ny;
-        lv_area_t inv = glyph_bbox(ac.pos);
-        area_union(inv, glyph_bbox(np));
+        lv_area_t inv = glyph_bbox(ac, ac.pos);
+        area_union(inv, glyph_bbox(ac, np));
         ac.pos = np;
         lv_obj_invalidate_area(s_acLayer, &inv);
     }
@@ -771,7 +787,7 @@ void setPrefetching(const char *hex, bool active) {
     if (!s_acLayer) return;
     for (const AcDraw &ac : s_acs) {
         if (strcmp(ac.hex, hex) != 0) continue;
-        lv_area_t a = glyph_bbox(ac.pos);
+        lv_area_t a = glyph_bbox(ac, ac.pos);
         lv_obj_invalidate_area(s_acLayer, &a);
         break;
     }
@@ -784,7 +800,7 @@ void setDetailLookup(const char *hex, bool active) {
     if (!s_acLayer) return;
     for (const AcDraw &ac : s_acs) {
         if (strcmp(ac.hex, hex) != 0) continue;
-        lv_area_t a = glyph_bbox(ac.pos);
+        lv_area_t a = glyph_bbox(ac, ac.pos);
         lv_obj_invalidate_area(s_acLayer, &a);
         break;
     }
