@@ -7,6 +7,7 @@
 #include <HTTPClient.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
+#include <esp_heap_caps.h>
 #include <string.h>
 #include <math.h>
 #include <time.h>   // route-cache TTL
@@ -18,15 +19,26 @@ static constexpr uint32_t ROUTE_CACHE_TTL_S = 900UL;          // 15 min: good en
 static constexpr uint32_t ROUTE_LEARN_TTL_S = 7200UL;         // 2h: remember likely same-day rotations, but forget stale legs quickly
 static constexpr int ROUTE_SCORE_STRONG = 5;
 static constexpr int ROUTE_SCORE_PERSIST = 4;
+static constexpr uint32_t ROUTE_TRANSPORT_BACKOFF_MS = 15000UL;
+static constexpr size_t ROUTE_MIN_TLS_BLOCK_BYTES = 28000;
+static constexpr size_t ROUTE_MIN_FLIGHTAWARE_BLOCK_BYTES = 30000;
 
 static char s_lastFetchMode[16] = "none";
 static char s_lastFetchUrl[128] = "";
 static int  s_lastFetchStatus = 0;
-static constexpr size_t FLIGHTAWARE_SCRAPE_LIMIT = 65536;
+static constexpr size_t FLIGHTAWARE_SCRAPE_LIMIT = 25600;
 static const char *FLIGHTAWARE_USER_AGENT =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/126.0.0.0 Safari/537.36";
+static uint32_t s_routeTransportCooldownUntilMs = 0;
+
+struct PsramAlloc : ArduinoJson::Allocator {
+    void *allocate(size_t n) override { return heap_caps_malloc(n, MALLOC_CAP_SPIRAM); }
+    void  deallocate(void *p) override { heap_caps_free(p); }
+    void *reallocate(void *p, size_t n) override { return heap_caps_realloc(p, n, MALLOC_CAP_SPIRAM); }
+};
+static PsramAlloc s_jsonPsram;
 
 struct RouteEndpoint {
     char label[40];
@@ -82,13 +94,40 @@ static void route_learn_key(const char *callsign, char *out, size_t on) {
     snprintf(out, on, "l%08lx", static_cast<unsigned long>(route_identity_hash("", callsign)));
 }
 
-#define ROUTE_FMT_VER 9   // bump to invalidate cache after switching to two-line route formatting
+#define ROUTE_FMT_VER 10   // bump to invalidate cache after switching to two-line route formatting
 #define ROUTE_LEARN_FMT_VER 1
 
 static void route_fetch_reset_debug() {
     snprintf(s_lastFetchMode, sizeof(s_lastFetchMode), "%s", "none");
     s_lastFetchUrl[0] = 0;
     s_lastFetchStatus = 0;
+}
+
+static bool route_transport_cooling(const char *tag = nullptr) {
+    if (!s_routeTransportCooldownUntilMs) return false;
+    const int32_t remainingMs = static_cast<int32_t>(s_routeTransportCooldownUntilMs - millis());
+    if (remainingMs <= 0) return false;
+    if (tag && tag[0]) {
+        Serial.printf("[route] %s skipped: transport cooldown %ld ms remaining\n",
+                      tag, static_cast<long>(remainingMs));
+    }
+    return true;
+}
+
+static void route_note_transport_failure(const char *tag, int code) {
+    const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    const String why = HTTPClient::errorToString(code);
+    Serial.printf("[route] %s transport %d (%s), biggest internal block=%u\n",
+                  tag ? tag : "-", code, why.c_str(), (unsigned)largest);
+    s_routeTransportCooldownUntilMs = millis() + ROUTE_TRANSPORT_BACKOFF_MS;
+}
+
+static bool route_memory_ok(const char *tag, size_t minBlock) {
+    const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    if (largest >= minBlock) return true;
+    Serial.printf("[route] %s skipped: low memory, biggest internal block=%u (<%u)\n",
+                  tag ? tag : "-", (unsigned)largest, (unsigned)minBlock);
+    return false;
 }
 
 void route_cache_begin() {
@@ -297,6 +336,9 @@ static void format_route_lines(const RouteEndpoint &fromEp, const RouteEndpoint 
 
 static bool route_fetch_flightaware(const char *callsign, char *line1, size_t l1n, char *line2, size_t l2n) {
     if (!callsign || !callsign[0]) return false;
+    if (route_transport_cooling("flightaware")) return false;
+    if (!route_memory_ok("flightaware", ROUTE_MIN_FLIGHTAWARE_BLOCK_BYTES)) return false;
+    Serial.printf("[route] flightaware trying: %s\n", callsign);
 
     char url[128];
     snprintf(url, sizeof(url), "https://www.flightaware.com/live/flight/%s", callsign);
@@ -319,12 +361,13 @@ static bool route_fetch_flightaware(const char *callsign, char *line1, size_t l1
     const int code = http.GET();
     s_lastFetchStatus = code;
     if (code != 200) {
+        if (code < 0) route_note_transport_failure("flightaware", code);
         http.end();
         return false;
     }
 
     String html;
-    html.reserve(4096);
+    html.reserve(6144);
     WiFiClient *stream = http.getStreamPtr();
     const uint32_t start = millis();
     while (http.connected() && html.length() < FLIGHTAWARE_SCRAPE_LIMIT && (millis() - start) < 2500UL) {
@@ -513,6 +556,16 @@ bool route_fetch(const char *hex, const char *callsign, float targetLat, float t
     if (l2n) line2[0] = 0;
     if ((!hex || !hex[0]) && (!callsign || !callsign[0])) return false;
     if (WiFi.status() != WL_CONNECTED) return false;
+    if (route_transport_cooling("lookup")) {
+        snprintf(s_lastFetchMode, sizeof(s_lastFetchMode), "%s", "cooldown");
+        s_lastFetchStatus = -1;
+        return false;
+    }
+    if (!route_memory_ok("lookup", ROUTE_MIN_TLS_BLOCK_BYTES)) {
+        snprintf(s_lastFetchMode, sizeof(s_lastFetchMode), "%s", "lowmem");
+        s_lastFetchStatus = -1;
+        return false;
+    }
 
     char cs[12] = "", hs[12] = "";
     normalize_token(callsign, cs, sizeof(cs));
@@ -542,9 +595,13 @@ bool route_fetch(const char *hex, const char *callsign, float targetLat, float t
 
     const int code = http.GET();
     s_lastFetchStatus = code;
-    if (code != 200) { http.end(); return false; }
+    if (code != 200) {
+        if (code < 0) route_note_transport_failure("adsbdb", code);
+        http.end();
+        return false;
+    }
 
-    JsonDocument filter;
+    JsonDocument filter(&s_jsonPsram);
     filter["response"]["flightroute"]["origin"]["municipality"] = true;
     filter["response"]["flightroute"]["origin"]["iata_code"] = true;
     filter["response"]["flightroute"]["origin"]["icao_code"] = true;
@@ -558,7 +615,7 @@ bool route_fetch(const char *hex, const char *callsign, float targetLat, float t
     filter["response"]["flightroute"]["destination"]["latitude"] = true;
     filter["response"]["flightroute"]["destination"]["longitude"] = true;
 
-    JsonDocument doc;
+    JsonDocument doc(&s_jsonPsram);
     DeserializationError err = deserializeJson(doc, http.getStream(),
                                                DeserializationOption::Filter(filter));
     http.end();
