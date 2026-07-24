@@ -679,7 +679,7 @@ static void handleRoot() {
         gpsRow += "<div style='font-size:12px;opacity:.6;margin:-2px 0 6px'>"
                   "When on, the location above is used until the GPS gets a fix, then it takes over.</div>";
     }
-    static const size_t BUFSZ = 24576;
+    static const size_t BUFSZ = 32768;
     static char *buf = (char *)ps_malloc(BUFSZ);   // PSRAM: keep this big page buffer off the scarce
     if (!buf) return;                              //   internal heap (the contiguous RAM mbedTLS needs)
     const int written = snprintf(buf, BUFSZ,
@@ -721,6 +721,10 @@ static void handleRoot() {
         "<div class=card><div class=t>Location &amp; range</div><form id=cfg method=POST action=/save onsubmit='return saveCfg(event)'>"
         "<label>Center point &mdash; tap the map or drag the pin</label>"
         "<div id=map></div>"
+        "<label>Saved locations</label><select id=locpreset><option value=''>Choose a saved location...</option></select>"
+        "<div style='display:grid;grid-template-columns:1fr auto;gap:8px;align-items:end'>"
+        "<div><label>Save current location as</label><input id=locname placeholder='Example: Home, KPDX, St. George'></div>"
+        "<button type=button class=sec style='margin-top:0' onclick='saveLocationPreset()'>Save location</button></div>"
         "<label>Center latitude</label><input id=lat name=lat value='%.5f'>"
         "<label>Center longitude</label><input id=lon name=lon value='%.5f'>"
         "%s"
@@ -765,9 +769,21 @@ static void handleRoot() {
         "var C=[%.5f,%.5f];var MAP=L.map('map').setView(C,10);"
         "L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'(c) OpenStreetMap',crossOrigin:'anonymous'}).addTo(MAP);"
         "var MK=L.marker(C,{draggable:true}).addTo(MAP);"
+        "const LOC_KEY='capsuleradar.savedLocations.v1';"
         "function S(p){document.getElementById('lat').value=p.lat.toFixed(5);document.getElementById('lon').value=p.lng.toFixed(5);}"
+        "function locLoad(){try{var raw=localStorage.getItem(LOC_KEY);var arr=raw?JSON.parse(raw):[];return Array.isArray(arr)?arr:[];}catch(e){return [];}}"
+        "function locStore(arr){localStorage.setItem(LOC_KEY,JSON.stringify(arr.slice(0,12)));}"
+        "function locRefresh(selectedName){var sel=document.getElementById('locpreset');if(!sel)return;var arr=locLoad();sel.innerHTML='';var opt=document.createElement('option');opt.value='';opt.textContent='Choose a saved location...';sel.appendChild(opt);"
+        "for(var i=0;i<arr.length;i++){var o=document.createElement('option');o.value=String(i);o.textContent=arr[i].name;sel.appendChild(o);}"
+        "if(selectedName){for(var j=0;j<arr.length;j++){if(arr[j].name===selectedName){sel.value=String(j);break;}}}}"
+        "function locApplyIndex(idx){var arr=locLoad();var it=arr[idx];if(!it)return;var p=L.latLng(it.lat,it.lon);MK.setLatLng(p);MAP.panTo(p);S(p);document.getElementById('locname').value=it.name||'';}"
+        "function saveLocationPreset(){var name=(document.getElementById('locname').value||'').trim();if(!name){alert('Enter a name for this saved location.');return;}var lat=parseFloat(document.getElementById('lat').value),lon=parseFloat(document.getElementById('lon').value);if(!isFinite(lat)||!isFinite(lon)){alert('Latitude/longitude are invalid.');return;}"
+        "var arr=locLoad().filter(function(x){return x&&x.name&&typeof x.lat==='number'&&typeof x.lon==='number';});var rec={name:name,lat:+lat.toFixed(5),lon:+lon.toFixed(5)};var replaced=false;"
+        "for(var i=0;i<arr.length;i++){if((arr[i].name||'').toLowerCase()===name.toLowerCase()){arr[i]=rec;replaced=true;break;}}if(!replaced)arr.unshift(rec);locStore(arr);locRefresh(name);}"
         "MK.on('dragend',function(){S(MK.getLatLng());});"
         "MAP.on('click',function(e){MK.setLatLng(e.latlng);S(e.latlng);});"
+        "document.getElementById('locpreset').addEventListener('change',function(){if(this.value==='')return;locApplyIndex(+this.value);});"
+        "locRefresh();"
         "setTimeout(function(){MAP.invalidateSize();},300);"
         "function b(v,s){fetch('/bright?v='+v+(s?'&save=1':''))}"
         "function v(x,s){fetch('/vol?v='+x+(s?'&save=1':''))}"
