@@ -11,9 +11,9 @@
 #define HOME_LON_DEFAULT    0.1059
 
 // ---------- Radar ----------
-#define RANGE_KM_DEFAULT    30.0f          // display range (outer ring). Query is wider, see ADSB_QUERY_KM
+#define RANGE_KM_DEFAULT    29.632f        // 16 nm display range (outer ring). Query is wider, see ADSB_QUERY_KM
 #define ADSB_QUERY_KM       50.0f          // feed query radius (> display: off-range traffic shows as edge arrows)
-static const float RANGE_STEPS_KM[] = {10.0f, 20.0f, 30.0f, 50.0f, 100.0f};
+static const float RANGE_STEPS_KM[] = {9.26f, 20.372f, 29.632f, 50.004f, 100.008f};
 #define POLL_INTERVAL_MS    2000           // be gentle with the free API (>=1000)
 #define POLL_INTERVAL_BATTERY_MS 5000      // slower polling when running on battery
 #define MOTION_INTERP       1              // 1 = glyphs glide between polls; 0 = snap to new pos

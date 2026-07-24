@@ -9,6 +9,7 @@
 #include "coastline.h"
 #include "airports.h"
 #include "route.h"
+#include "radar_mapbg.h"
 #include <lvgl.h>
 #include <math.h>
 #include <stdio.h>
@@ -319,16 +320,20 @@ static void grid_draw_cb(lv_event_t *e) {
         td.border_color = lv_color_hex(0x8A4A00);
         td.border_width = 1;
         td.border_opa = 160;
-        coastline_draw(d, COAST_COLOR, 170, 2);    // landmass outline under the triangle
-        if (s_airportsEnabled) airports_draw(d, AIRPORT_CROSS_COLOR, AIRPORT_LABEL_COLOR, 235);
+        if (!radar_mapbg::active()) {
+            coastline_draw(d, COAST_COLOR, 170, 2);    // landmass outline under the triangle
+            if (s_airportsEnabled) airports_draw(d, AIRPORT_CROSS_COLOR, AIRPORT_LABEL_COLOR, 235);
+        }
         lv_draw_polygon(d, &td, tri, 3);
         return;
     }
 
     // coastline first, so the rings/crosshair sit cleanly on top of it.
     // Steel blue + 2 px so it reads as a map outline, distinct from the green altitude trails.
-    coastline_draw(d, COAST_COLOR, 165, 2);
-    if (s_airportsEnabled) airports_draw(d, AIRPORT_CROSS_COLOR, AIRPORT_LABEL_COLOR, 235);
+    if (!radar_mapbg::active()) {
+        coastline_draw(d, COAST_COLOR, 165, 2);
+        if (s_airportsEnabled) airports_draw(d, AIRPORT_CROSS_COLOR, AIRPORT_LABEL_COLOR, 235);
+    }
 
     // phosphor: concentric rings + crosshair
     lv_draw_arc_dsc_t ad;
@@ -806,6 +811,11 @@ void setDetailLookup(const char *hex, bool active) {
     }
 }
 
+void refreshBackground(float rangeKm) {
+    radar_mapbg::load_for_range(rangeKm);
+    if (s_gridLayer) lv_obj_invalidate(s_gridLayer);
+}
+
 void init(void *lv_parent) {
     lv_obj_t *parent = (lv_obj_t *)lv_parent;
     s_parent = parent;
@@ -816,6 +826,8 @@ void init(void *lv_parent) {
     s_flow.clear();
     s_selHex.clear();
     s_flowRedrawCtr = 0;
+
+    radar_mapbg::begin(parent);
 
     lv_obj_clear_flag(parent, LV_OBJ_FLAG_SCROLLABLE);
 
@@ -896,6 +908,7 @@ void update(const std::vector<Aircraft> &aircraft, const RadarSettings &s) {
     if (s.homeLat != s_coLat || s.homeLon != s_coLon || s.rangeKm != s_coRange) {
         const bool firstFix = (s_coRange < 0.0f);
         s_coLat = s.homeLat; s_coLon = s.homeLon; s_coRange = s.rangeKm;
+        radar_mapbg::load_for_range(s.rangeKm);
         coastline_project(s.homeLat, s.homeLon, s.rangeKm, s_cx, s_cy, R);
         airports_project(s.homeLat, s.homeLon, s.rangeKm, s_cx, s_cy, R);
         if (s_gridLayer) lv_obj_invalidate(s_gridLayer);

@@ -12,6 +12,7 @@
 #include "photo.h"
 #include "photo_client.h"
 #include "radar_view.h"
+#include "radar_mapbg.h"
 #include "ui.h"
 #include "display.h"                  // M0: CO5300 + LVGL bring-up
 #include "imu_qmi8658.h"             // face-down sleep
@@ -30,6 +31,7 @@
 #include <HTTPClient.h>             // remote release manifest + firmware download
 #include <WiFiClientSecure.h>       // HTTPS for remote firmware download
 #include <FS.h>                     // SD sprite installer
+#include <LittleFS.h>               // cached radar map backgrounds (shared companion data partition)
 #include <SD_MMC.h>                 // SD sprite installer
 #include <ESPmDNS.h>                // http://capsuleradar.local
 #include <ArduinoOTA.h>             // OTA firmware update over WiFi (PlatformIO/espota)
@@ -88,6 +90,7 @@ static volatile uint32_t     g_lastFeedOkMs = 0;                     // millis()
 static volatile bool         g_detailDirty = false;                  // route/photo finished -> refresh card without waiting for next feed poll
 static volatile uint32_t     g_rebootAtMs = 0;                       // !=0: reboot when millis() reaches it (clean start after WiFi config)
 static volatile bool         g_firmwareUpdateInProgress = false;     // pause background network work while self-flashing
+static volatile bool         g_mapBgRefreshPending = false;          // defer JPEG reload until after HTTP uploads complete
 static bool                  g_firmwareUpdateMode = false;           // lightweight boot mode for GitHub TLS + self-update
 static volatile bool         g_launchAlternateFirmware = false;       // reboot into the other OTA slot (experimental PrintSphere)
 static String                g_tz = TZ_STR;                          // POSIX timezone (web-configurable, NVS); applied via configTzTime
@@ -132,6 +135,9 @@ static const uint32_t MIN_FIRMWARE_SIZE_BYTES = 512UL * 1024UL;
 // GitHub TLS pressure.
 static File              g_spriteUploadFile;
 static bool              g_spriteUploadOk = false;
+static File              g_mapBgUploadFile;
+static bool              g_mapBgUploadOk = false;
+static int               g_mapBgUploadRangeNm = 0;
 
 // ---- networking task (core 0): fetch + parse, never touches the display ----
 static void adsb_task(void*) {
@@ -457,16 +463,17 @@ static WebServer g_web(80);
 
 static void handleRoot() {
     const int th = radar::theme();
-    const int ranges[] = {10, 15, 25, 30, 50, 100, 150, 250};
+    const float ranges[] = {9.26f, 20.372f, 29.632f, 50.004f, 100.008f};
     // The value submitted stays in km (the device works in km); only the label is shown in
     // the user's chosen distance unit so the config page matches the screen.
     const float    ufac  = (g_units == 0) ? 0.539957f : (g_units == 2 ? 0.621371f : 1.0f);
     const char    *uname = (g_units == 0) ? "nm" : (g_units == 2 ? "mi" : "km");
     String ropts;
-    for (int r : ranges) {
+    for (float r : ranges) {
         char o[72];
-        snprintf(o, sizeof(o), "<option value=%d%s>%.0f %s</option>",
-                 r, (r == (int)(g_settings.rangeKm + 0.5f)) ? " selected" : "", r * ufac, uname);
+        const bool sel = fabsf(g_settings.rangeKm - r) < 0.2f;
+        snprintf(o, sizeof(o), "<option value=%.3f%s>%.0f %s</option>",
+                 (double)r, sel ? " selected" : "", r * ufac, uname);
         ropts += o;
     }
     const char *tnames[] = {"Phosphor", "Orb", "Amber CRT", "Military"};
@@ -554,15 +561,16 @@ static void handleRoot() {
         gpsRow += "<div style='font-size:12px;opacity:.6;margin:-2px 0 6px'>"
                   "When on, the location above is used until the GPS gets a fix, then it takes over.</div>";
     }
-    static const size_t BUFSZ = 14336;
+    static const size_t BUFSZ = 24576;
     static char *buf = (char *)ps_malloc(BUFSZ);   // PSRAM: keep this big page buffer off the scarce
     if (!buf) return;                              //   internal heap (the contiguous RAM mbedTLS needs)
-    snprintf(buf, BUFSZ,
+    const int written = snprintf(buf, BUFSZ,
         "<!DOCTYPE html><html><head><meta charset=utf-8>"
         "<meta name=viewport content='width=device-width,initial-scale=1'>"
         "<title>Capsule Radar</title>"
         "<link rel=stylesheet href='https://unpkg.com/leaflet@1.9.4/dist/leaflet.css'>"
         "<script src='https://unpkg.com/leaflet@1.9.4/dist/leaflet.js'></script>"
+        "<script src='https://unpkg.com/leaflet-image@0.4.0/leaflet-image.js'></script>"
         "<style>"
         "*{box-sizing:border-box}"
         "body{background:radial-gradient(circle at 50%% -10%%,#0a1f15,#04100a 70%%);color:#cdd6d1;"
@@ -602,6 +610,10 @@ static void handleRoot() {
         "<label>Theme</label><select name=theme>%s</select>"
         "<label>Time zone</label><select name=tz>%s</select>"
         "<button>Save &amp; restart</button></form></div>"
+        "<div class=card><div class=t>Map Background</div>"
+        "<p style='color:#9affc8;font-size:13px;margin:0 0 8px'>Experimental: generate muted static map backgrounds for the supported radar ranges and upload them to the device. When available, these replace the coastline and airport overlays.</p>"
+        "<button type=button class=sec id=mbgbtn onclick='mbg()'>Generate radar map backgrounds</button>"
+        "<pre id=mbgstatus style='white-space:pre-wrap;color:#9affc8;background:#041008;border:1px solid #244b35;border-radius:10px;padding:10px;min-height:72px;margin-top:12px'>Ready.</pre></div>"
         "<div class=card><div class=t>Display</div>"
         "<label>Brightness</label>"
         "<input type=range min=5 max=255 value='%d' oninput='b(this.value,0)' onchange='b(this.value,1)'>"
@@ -633,7 +645,7 @@ static void handleRoot() {
         "<p class=ft>Reach me at <code>capsuleradar.local</code> &middot; v" FW_VERSION "</p>"
         "<script>"
         "var C=[%.5f,%.5f];var MAP=L.map('map').setView(C,10);"
-        "L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'(c) OpenStreetMap'}).addTo(MAP);"
+        "L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,attribution:'(c) OpenStreetMap',crossOrigin:'anonymous'}).addTo(MAP);"
         "var MK=L.marker(C,{draggable:true}).addTo(MAP);"
         "function S(p){document.getElementById('lat').value=p.lat.toFixed(5);document.getElementById('lon').value=p.lng.toFixed(5);}"
         "MK.on('dragend',function(){S(MK.getLatLng());});"
@@ -657,6 +669,27 @@ static void handleRoot() {
         "function al(v){fetch('/alerts?mode='+v+'&save=1')}"
         "function px(v){fetch('/alerts?prox='+v+'&save=1')}"
         "function gp(c){fetch('/gps?v='+(c?1:0)+'&save=1')}"
+        "const MBG_RANGES_NM=[5,11,16,27,54];"
+        "function nmToKm(nm){return nm*1.852;}"
+        "function mbgStatus(t){var o=document.getElementById('mbgstatus');if(o)o.textContent=t;}"
+        "function mbgBounds(lat,lon,km){var latD=(km/111.0)*1.08;var cosLat=Math.cos(lat*Math.PI/180);var lonD=latD/Math.max(0.15,Math.abs(cosLat));return[[lat-latD,lon-lonD],[lat+latD,lon+lonD]];}"
+        "function mbgTint(src){var out=document.createElement('canvas');out.width=466;out.height=466;var ctx=out.getContext('2d',{willReadFrequently:true});ctx.drawImage(src,0,0,466,466);var img=ctx.getImageData(0,0,466,466),d=img.data;"
+        "for(var i=0;i<d.length;i+=4){var r=d[i],g=d[i+1],b=d[i+2],a=d[i+3];if(a===0)continue;var lum=0.299*r+0.587*g+0.114*b;d[i]=Math.max(0,Math.min(255,lum*0.72+r*0.10-8));d[i+1]=Math.max(0,Math.min(255,lum*0.82+g*0.16+4));d[i+2]=Math.max(0,Math.min(255,lum*0.74+b*0.08-6));}"
+        "ctx.putImageData(img,0,0);ctx.fillStyle='rgba(4,12,8,0.28)';ctx.fillRect(0,0,466,466);"
+        "var grad=ctx.createRadialGradient(233,233,80,233,233,250);grad.addColorStop(0,'rgba(255,255,255,0)');grad.addColorStop(1,'rgba(0,0,0,0.18)');ctx.fillStyle=grad;ctx.fillRect(0,0,466,466);"
+        "ctx.fillStyle='rgba(234,255,243,0.72)';ctx.font='10px sans-serif';ctx.textAlign='right';ctx.fillText('(c) OSM',458,460);return out;}"
+        "function mbgBlob(canvas){return new Promise(function(res,rej){canvas.toBlob(function(b){if(b)res(b);else rej(new Error('Image encode failed'));},'image/jpeg',0.82);});}"
+        "function mbgOffscreen(){var d=document.getElementById('mbgmap');if(d)return d;d=document.createElement('div');d.id='mbgmap';d.style.cssText='position:absolute;left:-9999px;top:-9999px;width:466px;height:466px;overflow:hidden';document.body.appendChild(d);return d;}"
+        "function mbgWaitTiles(layer){return new Promise(function(res,rej){var done=false;function ok(){if(done)return;done=true;setTimeout(res,350);}function bad(){if(done)return;done=true;rej(new Error('Map tiles failed to load for export'));}layer.once('load',ok);layer.once('tileerror',bad);setTimeout(ok,4500);});}"
+        "async function mbgRenderRange(lat,lon,rangeNm){if(typeof leafletImage!=='function')throw new Error('leaflet-image library unavailable');var host=mbgOffscreen();host.innerHTML='';var map=L.map(host,{zoomControl:false,attributionControl:false,fadeAnimation:false,zoomAnimation:false,inertia:false,preferCanvas:true});"
+        "var layer=L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19,crossOrigin:'anonymous'}).addTo(map);map.fitBounds(mbgBounds(lat,lon,nmToKm(rangeNm)),{animate:false,padding:[0,0]});await mbgWaitTiles(layer);"
+        "var canvas=await new Promise(function(res,rej){leafletImage(map,function(err,c){if(err)rej(err);else res(c);});});map.remove();return mbgTint(canvas);}"
+        "async function mbgUpload(rangeNm,blob){var fd=new FormData();fd.append('file',blob,'radarbg_'+rangeNm+'nm.jpg');var r=await fetch('/mapbg/upload?range='+encodeURIComponent(rangeNm),{method:'POST',body:fd});if(!r.ok)throw new Error(await r.text());}"
+        "async function mbg(){var btn=document.getElementById('mbgbtn');if(btn)btn.disabled=true;try{var lat=parseFloat(document.getElementById('lat').value),lon=parseFloat(document.getElementById('lon').value);if(!isFinite(lat)||!isFinite(lon))throw new Error('Latitude/longitude are invalid');"
+        "for(var i=0;i<MBG_RANGES_NM.length;i++){var nm=MBG_RANGES_NM[i];mbgStatus('Generating background '+(i+1)+'/'+MBG_RANGES_NM.length+' for '+nm+' nm...');var canvas=await mbgRenderRange(lat,lon,nm);var blob=await mbgBlob(canvas);mbgStatus('Uploading background '+(i+1)+'/'+MBG_RANGES_NM.length+' for '+nm+' nm...');await mbgUpload(nm,blob);}"
+        "mbgStatus('Done. Uploaded '+MBG_RANGES_NM.length+' range-specific radar map backgrounds.');}"
+        "catch(e){mbgStatus('Map background generation failed: '+e.message+'\\n\\nThis proof of concept depends on browser-side map export. If the tile server or browser blocks canvas export, we will need a different image source.');}"
+        "finally{if(btn)btn.disabled=false;}}"
         // auto-pick the visitor's time zone from their browser clock (only if they haven't set one)
         "var TZSET=%d;(function(){if(TZSET)return;"
         "var d=new Date(),j=new Date(d.getFullYear(),0,1).getTimezoneOffset(),"
@@ -674,6 +707,9 @@ static void handleRoot() {
         g_volume, g_muted ? "checked" : "", g_quietHours ? "checked" : "",
         quietStart, quietEnd, aopts.c_str(), popts.c_str(),
         g_settings.homeLat, g_settings.homeLon, (g_tz == TZ_STR ? 0 : 1));
+    if (written < 0 || (size_t)written >= BUFSZ) {
+        Serial.printf("[web] config page truncated (%d bytes, buffer=%u)\n", written, (unsigned)BUFSZ);
+    }
     g_web.send(200, "text/html", buf);
 }
 
@@ -1192,6 +1228,14 @@ static bool spritePathSafe(const char *name) {
     return strncmp(name, "mons/", 5) == 0;
 }
 
+static bool parseRadarMapRangeArg(int *rangeNm) {
+    if (!rangeNm || !g_web.hasArg("range")) return false;
+    const int parsed = g_web.arg("range").toInt();
+    if (!radar_mapbg::supported_range_bucket(parsed)) return false;
+    *rangeNm = parsed;
+    return true;
+}
+
 static void handleSpritesPage() {
     String page =
         "<!DOCTYPE html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>"
@@ -1686,6 +1730,51 @@ static void handleUpdateUpload() {
     }
 }
 
+static void handleRadarMapUpload() {
+    HTTPUpload &up = g_web.upload();
+    if (up.status == UPLOAD_FILE_START) {
+        g_firmwareUpdateInProgress = true;
+        g_mapBgUploadOk = false;
+        g_mapBgUploadRangeNm = 0;
+        if (!parseRadarMapRangeArg(&g_mapBgUploadRangeNm)) {
+            Serial.println("[mapbg] upload rejected: invalid range");
+            return;
+        }
+        const String path = radar_mapbg::file_path_for_range(g_mapBgUploadRangeNm);
+        LittleFS.mkdir("/radarbg");
+        if (LittleFS.exists(path)) LittleFS.remove(path);
+        g_mapBgUploadFile = LittleFS.open(path, FILE_WRITE);
+        if (!g_mapBgUploadFile) {
+            Serial.printf("[mapbg] upload open failed: %s\n", path.c_str());
+            return;
+        }
+        g_mapBgUploadOk = true;
+        Serial.printf("[mapbg] upload start: %s\n", path.c_str());
+    } else if (up.status == UPLOAD_FILE_WRITE) {
+        if (g_mapBgUploadOk && g_mapBgUploadFile) {
+            if (g_mapBgUploadFile.write(up.buf, up.currentSize) != up.currentSize) {
+                g_mapBgUploadOk = false;
+            }
+        }
+    } else if (up.status == UPLOAD_FILE_END) {
+        if (g_mapBgUploadFile) g_mapBgUploadFile.close();
+        g_firmwareUpdateInProgress = false;
+        if (g_mapBgUploadOk) {
+            Serial.printf("[mapbg] upload complete: %d nm\n", g_mapBgUploadRangeNm);
+            if (radar_mapbg::nearest_range_bucket(g_settings.rangeKm) == g_mapBgUploadRangeNm) {
+                g_mapBgRefreshPending = true;
+            }
+        }
+    } else if (up.status == UPLOAD_FILE_ABORTED) {
+        if (g_mapBgUploadFile) g_mapBgUploadFile.close();
+        if (g_mapBgUploadRangeNm > 0) {
+            LittleFS.remove(radar_mapbg::file_path_for_range(g_mapBgUploadRangeNm));
+        }
+        g_mapBgUploadOk = false;
+        g_firmwareUpdateInProgress = false;
+    }
+}
+
 static bool selectOtherOtaSlotForBoot(String &message) {
     const esp_partition_t *running = esp_ota_get_running_partition();
     if (!running) {
@@ -1786,6 +1875,12 @@ void setup() {
 
     loadSettings();
     route_cache_begin();   // clear stale route cache if the label format changed
+    if (LittleFS.begin(false, "/littlefs", 10, "sounds")) {
+        Serial.println("[littlefs] mounted sounds partition for radar assets");
+        LittleFS.mkdir("/radarbg");
+    } else {
+        Serial.println("[littlefs] mount failed for sounds partition");
+    }
 
     // --- Display + LVGL (M0) ----------------------------------------------
     // CO5300 AMOLED over QSPI + LVGL draw buffers in PSRAM, then a hello screen.
@@ -1904,6 +1999,12 @@ void setup() {
             g_firmwareUpdateInProgress = false;
         },
         handleSpriteUpload);
+    g_web.on("/mapbg/upload", HTTP_POST,
+        []() {
+            g_web.send(g_mapBgUploadOk ? 200 : 500, "text/plain", g_mapBgUploadOk ? "OK" : "map background upload failed");
+            g_firmwareUpdateInProgress = false;
+        },
+        handleRadarMapUpload);
     g_web.on("/update", HTTP_GET, handleUpdatePage);
     g_web.on("/enter-update-mode", HTTP_POST, handleEnterUpdateMode);
     g_web.on("/exit-update-mode", HTTP_POST, handleExitUpdateMode);
@@ -2015,6 +2116,10 @@ void loop() {
     if (g_appMode == 0 && g_detailDirty) {
         g_detailDirty = false;
         ui_on_data_updated();          // route/photo landed; refresh detail card immediately
+    }
+    if (g_appMode == 0 && g_mapBgRefreshPending) {
+        g_mapBgRefreshPending = false;
+        radar::refreshBackground(g_settings.rangeKm);
     }
     if (g_appMode == 0) updatePrefetchIndicators();
 

@@ -77,5 +77,6 @@ void setTrackingFontSize(int level);             // 0=small 1=medium 2=large air
 int  trackingFontSize();
 void setPrefetching(const char *hex, bool active); // flash a contact while detail data is being fetched
 void setDetailLookup(const char *hex, bool active); // flash the selected contact during manual detail lookup
+void refreshBackground(float rangeKm);          // reload the static background for the nearest range bucket
 
 } // namespace radar
