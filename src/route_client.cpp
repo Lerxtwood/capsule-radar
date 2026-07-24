@@ -351,7 +351,7 @@ static bool route_fetch_flightaware(const char *callsign, char *line1, size_t l1
     http.setConnectTimeout(3000);
     http.setTimeout(5000);
     http.setFollowRedirects(HTTPC_STRICT_FOLLOW_REDIRECTS);
-    if (!http.begin(client, url)) return false;
+    if (!http.begin(client, url)) { client.stop(); return false; }
     http.addHeader("User-Agent", FLIGHTAWARE_USER_AGENT);
     http.addHeader("Accept", "text/html,application/xhtml+xml");
     http.addHeader("Accept-Language", "en-US,en;q=0.9");
@@ -363,6 +363,7 @@ static bool route_fetch_flightaware(const char *callsign, char *line1, size_t l1
     if (code != 200) {
         if (code < 0) route_note_transport_failure("flightaware", code);
         http.end();
+        client.stop();
         return false;
     }
 
@@ -388,6 +389,7 @@ static bool route_fetch_flightaware(const char *callsign, char *line1, size_t l1
         }
     }
     http.end();
+    client.stop();
     if (html.length() == 0) return false;
 
     RouteEndpoint faFrom = {}, faTo = {};
@@ -590,7 +592,7 @@ bool route_fetch(const char *hex, const char *callsign, float targetLat, float t
     http.setReuse(false);
     http.setConnectTimeout(3000);   // short: runs on the feed task, don't stall the live poll
     http.setTimeout(6000);
-    if (!http.begin(client, url)) return false;
+    if (!http.begin(client, url)) { client.stop(); return false; }
     http.addHeader("User-Agent", ADSB_USER_AGENT);
 
     const int code = http.GET();
@@ -598,6 +600,7 @@ bool route_fetch(const char *hex, const char *callsign, float targetLat, float t
     if (code != 200) {
         if (code < 0) route_note_transport_failure("adsbdb", code);
         http.end();
+        client.stop();
         return false;
     }
 
@@ -619,6 +622,7 @@ bool route_fetch(const char *hex, const char *callsign, float targetLat, float t
     DeserializationError err = deserializeJson(doc, http.getStream(),
                                                DeserializationOption::Filter(filter));
     http.end();
+    client.stop();
     if (err) return false;
 
     JsonObjectConst fr = doc["response"]["flightroute"].as<JsonObjectConst>();

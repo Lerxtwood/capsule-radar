@@ -7,13 +7,16 @@
 // then keeps only the nearest ~20 for display.
 #include "adsb_client.h"
 #include "config.h"
+#include "geo.h"
 #include <WiFi.h>
 #include <WiFiClientSecure.h>
 #include <HTTPClient.h>
 #include <ArduinoJson.h>   // v7
 #include <esp_heap_caps.h>
+#include <algorithm>
 
 static constexpr uint32_t ADSB_RATE_LIMIT_BACKOFF_MS = 60000UL;
+static constexpr uint32_t ADSB_TRANSPORT_BACKOFF_MS = 10000UL;
 
 // Parse the JSON in PSRAM, not internal RAM. Otherwise the per-poll JSON alloc/free
 // churn fragments the internal heap and, after a while, mbedTLS can't find a large
@@ -50,17 +53,31 @@ uint32_t AdsbClient::hostCooldownRemainingMs(uint32_t untilMs) const {
     return untilMs - millis();
 }
 
+AdsbClient::FailureKind AdsbClient::cooldownFailureKind(bool primaryCooling, bool fallbackCooling) const {
+    const FailureKind pk = primaryCooling ? _primaryCooldownKind : FailureKind::None;
+    const FailureKind fk = fallbackCooling ? _fallbackCooldownKind : FailureKind::None;
+    if (pk == FailureKind::Transport || fk == FailureKind::Transport) return FailureKind::Transport;
+    if (pk == FailureKind::Other || fk == FailureKind::Other) return FailureKind::Other;
+    if (pk == FailureKind::RateLimited || fk == FailureKind::RateLimited) return FailureKind::RateLimited;
+    return FailureKind::None;
+}
+
 bool AdsbClient::poll(std::vector<Aircraft>& out) {
     if (WiFi.status() != WL_CONNECTED) return false;
+    _lastFailureKind = FailureKind::None;
     const bool primaryCooling = hostCooldownActive(_primaryCooldownUntilMs);
     const bool fallbackCooling = hostCooldownActive(_fallbackCooldownUntilMs);
+    if (primaryCooling || fallbackCooling) {
+        _lastFailureKind = cooldownFailureKind(primaryCooling, fallbackCooling);
+    }
 
     // Prefer the primary host, and give it a quick second try before touching the fallback:
     // the primary is reliable in practice, while the fallback can be slow to time out from
     // some networks (turning one transient primary blip into a long no-data gap + amber HUD).
     if (!primaryCooling) {
         if (fetchFrom(ADSB_PRIMARY_HOST, out)) return true;
-        if (fetchFrom(ADSB_PRIMARY_HOST, out)) return true;   // transient blip -> retry the healthy host
+        if (!hostCooldownActive(_primaryCooldownUntilMs) &&
+            fetchFrom(ADSB_PRIMARY_HOST, out)) return true;   // transient blip -> retry the healthy host
     }
     if (!fallbackCooling) return fetchFrom(ADSB_FALLBACK_HOST, out);   // last resort / cooldown escape hatch
     return false;
@@ -88,16 +105,32 @@ bool AdsbClient::fetchFrom(const char* host, std::vector<Aircraft>& out) {
 
     const int code = http.GET();
     if (code != 200) {
+        uint32_t &cooldownUntilMs = (strcmp(host, ADSB_PRIMARY_HOST) == 0)
+            ? _primaryCooldownUntilMs : _fallbackCooldownUntilMs;
         if (code == 429) {
-            uint32_t &cooldownUntilMs = (strcmp(host, ADSB_PRIMARY_HOST) == 0)
-                ? _primaryCooldownUntilMs : _fallbackCooldownUntilMs;
             cooldownUntilMs = millis() + ADSB_RATE_LIMIT_BACKOFF_MS;
+            if (strcmp(host, ADSB_PRIMARY_HOST) == 0) _primaryCooldownKind = FailureKind::RateLimited;
+            else                                      _fallbackCooldownKind = FailureKind::RateLimited;
+            _lastFailureKind = FailureKind::RateLimited;
             Serial.printf("[adsb] HTTP 429 (%s) -> backing off for %lus\n",
                           host, (unsigned long)(ADSB_RATE_LIMIT_BACKOFF_MS / 1000UL));
+        } else if (code < 0) {
+            cooldownUntilMs = millis() + ADSB_TRANSPORT_BACKOFF_MS;
+            if (strcmp(host, ADSB_PRIMARY_HOST) == 0) _primaryCooldownKind = FailureKind::Transport;
+            else                                      _fallbackCooldownKind = FailureKind::Transport;
+            _lastFailureKind = FailureKind::Transport;
+            const String why = HTTPClient::errorToString(code);
+            Serial.printf("[adsb] HTTP %d (%s: %s) -> transport backoff %lus\n",
+                          code, host, why.c_str(),
+                          (unsigned long)(ADSB_TRANSPORT_BACKOFF_MS / 1000UL));
         } else {
+            if (strcmp(host, ADSB_PRIMARY_HOST) == 0) _primaryCooldownKind = FailureKind::Other;
+            else                                      _fallbackCooldownKind = FailureKind::Other;
+            _lastFailureKind = FailureKind::Other;
             Serial.printf("[adsb] HTTP %d (%s)\n", code, host);
         }
         http.end();
+        client.stop();
         return false;
     }
 
@@ -115,6 +148,7 @@ bool AdsbClient::fetchFrom(const char* host, std::vector<Aircraft>& out) {
     DeserializationError err = deserializeJson(doc, http.getStream(),
                                                DeserializationOption::Filter(filter));
     http.end();
+    client.stop();
     if (err) return false;
 
     JsonArrayConst arr = doc["ac"].as<JsonArrayConst>();
@@ -150,7 +184,19 @@ bool AdsbClient::fetchFrom(const char* host, std::vector<Aircraft>& out) {
         tmp.push_back(std::move(ac));
     }
 
+    if (tmp.size() > _liveAircraftCap) {
+        std::sort(tmp.begin(), tmp.end(),
+                  [this](const Aircraft &a, const Aircraft &b) {
+                      return geo::haversineKm(_lat, _lon, a.lat, a.lon) <
+                             geo::haversineKm(_lat, _lon, b.lat, b.lon);
+                  });
+        tmp.resize(_liveAircraftCap);
+    }
+
     out.swap(tmp);
     _lastOkMs = now;
+    _primaryCooldownKind = FailureKind::None;
+    _fallbackCooldownKind = FailureKind::None;
+    _lastFailureKind = FailureKind::None;
     return true;
 }

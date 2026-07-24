@@ -74,6 +74,7 @@ static esp_ota_handle_t      g_updateOtaHandle = 0;                  // fixed-sl
 static const esp_partition_t *g_updateOtaPartition = nullptr;
 static bool                  g_updateUploadOk = false;
 static bool                  g_showAirports = true;                  // airport markers on/off (web/NVS)
+static int                   g_liveAircraftCap = ADSB_LIVE_AIRCRAFT_CAP; // max nearby aircraft to keep live (web/NVS)
 static bool                  g_showMapBackground = false;            // show cached static map under the radar scope
 static int                   g_rotation = 0;                         // display rotation 0/1/2/3 = 0/90/180/270 (web/NVS)
 static int                   g_rotationOffset = 0;                   // fine display rotation adjustment, degrees (web/NVS)
@@ -94,6 +95,8 @@ static volatile bool         g_firmwareUpdateInProgress = false;     // pause ba
 static volatile bool         g_mapBgRefreshPending = false;          // defer JPEG reload until after HTTP uploads complete
 static bool                  g_firmwareUpdateMode = false;           // lightweight boot mode for GitHub TLS + self-update
 static volatile bool         g_launchAlternateFirmware = false;       // reboot into the other OTA slot (experimental PrintSphere)
+static bool                  g_otaUp = false;                        // OTA/mDNS service started on core 1?
+static bool                  g_mdnsUp = false;                       // mDNS responder active?
 static String                g_tz = TZ_STR;                          // POSIX timezone (web-configurable, NVS); applied via configTzTime
 struct PrefetchTrack { std::string hex, call; uint32_t startedMs; };
 static std::vector<PrefetchTrack> g_prefetching;
@@ -139,6 +142,75 @@ static bool              g_spriteUploadOk = false;
 static File              g_mapBgUploadFile;
 static bool              g_mapBgUploadOk = false;
 static int               g_mapBgUploadRangeNm = 0;
+static constexpr uint32_t ADSB_TRANSPORT_REBOOT_OUTAGE_MS = 30000UL;
+static constexpr uint32_t ADSB_TRANSPORT_REBOOT_MIN_GAP_MS = 15000UL;
+static constexpr uint8_t  ADSB_TRANSPORT_REBOOT_FAILS = 4;
+static constexpr uint32_t ADSB_GENERIC_REBOOT_OUTAGE_MS = 35000UL;
+static constexpr uint32_t ADSB_GENERIC_REBOOT_MIN_GAP_MS = 20000UL;
+static constexpr uint8_t  ADSB_GENERIC_REBOOT_FAILS = 6;
+static constexpr size_t    PREFETCH_BUSY_AIRCRAFT_LIMIT = 12;
+static constexpr size_t    PREFETCH_QUEUE_LIMIT = 2;
+
+static void adsb_pause_detail_lookups() {
+    route_cancel_prefetches();
+    photo_cancel_prefetches();
+    for (const PrefetchTrack &p : g_prefetching) radar::setPrefetching(p.hex.c_str(), false);
+    g_prefetching.clear();
+}
+
+static uint32_t adsb_poll_interval_for_count(size_t aircraftCount) {
+    const uint32_t baseMs = g_onBattery ? POLL_INTERVAL_BATTERY_MS : POLL_INTERVAL_MS;
+    if (aircraftCount <= 5) return baseMs;
+    const size_t extraBuckets = (aircraftCount - 1) / 5;   // 6-10 => 1, 11-15 => 2, ...
+    return baseMs + (uint32_t)extraBuckets * 2000UL;
+}
+
+static float adsb_query_radius_for_display(float displayKm) {
+    // Keep a modest off-screen buffer so edge arrows still feel good, but avoid the
+    // old hard 50 km minimum that massively over-queried the feed at 5/11 nm zooms.
+    float mult = 1.25f;
+    if (displayKm <= 10.0f) mult = 1.15f;          // 5 nm: keep the query tight
+    else if (displayKm <= 21.0f) mult = 1.20f;     // 11 nm
+    else if (displayKm <= 30.0f) mult = 1.25f;     // 16 nm
+    else if (displayKm <= 55.0f) mult = 1.35f;     // 27 nm
+    else                         mult = 1.50f;     // 54 nm
+
+    float queryKm = displayKm * mult;
+    const float minExtraKm = displayKm + 6.0f;     // still show some off-scope traffic
+    if (queryKm < minExtraKm) queryKm = minExtraKm;
+    if (queryKm > 140.0f) queryKm = 140.0f;
+    return queryKm;
+}
+
+static void adsb_note_feed_failure(AdsbClient::FailureKind failureKind,
+                                   uint32_t nowMs, int &failCount, uint32_t lastFeedOk,
+                                   uint32_t &lastRecoveryAttemptMs) {
+    if (++failCount == 2) {
+        Serial.println("[adsb] pausing route/photo lookups while feed recovers");
+        adsb_pause_detail_lookups();
+    }
+    if (failCount >= 5) g_feedOk = false;
+
+    const uint32_t outageMs = nowMs - lastFeedOk;
+    const uint32_t sinceRecoveryMs = nowMs - lastRecoveryAttemptMs;
+    if (failureKind == AdsbClient::FailureKind::Transport &&
+        failCount >= ADSB_TRANSPORT_REBOOT_FAILS &&
+        outageMs >= ADSB_TRANSPORT_REBOOT_OUTAGE_MS &&
+        sinceRecoveryMs >= ADSB_TRANSPORT_REBOOT_MIN_GAP_MS) {
+        Serial.printf("[adsb] feed transport refused for %lus (%d fails) -> rebooting\n",
+                      (unsigned long)(outageMs / 1000UL), failCount);
+        delay(100);
+        ESP.restart();
+    } else if (failureKind != AdsbClient::FailureKind::RateLimited &&
+               failCount >= ADSB_GENERIC_REBOOT_FAILS &&
+               outageMs >= ADSB_GENERIC_REBOOT_OUTAGE_MS &&
+               sinceRecoveryMs >= ADSB_GENERIC_REBOOT_MIN_GAP_MS) {
+        Serial.printf("[adsb] feed stuck %lus (%d fails) -> rebooting\n",
+                      (unsigned long)(outageMs / 1000UL), failCount);
+        delay(100);
+        ESP.restart();
+    }
+}
 
 // ---- networking task (core 0): fetch + parse, never touches the display ----
 static void adsb_task(void*) {
@@ -146,6 +218,10 @@ static void adsb_task(void*) {
     bool wasConnected = false;
     uint32_t lastPoll = 0;
     uint32_t lastFeedOk = millis();          // self-heal: time of last good (or no-WiFi) poll
+    uint32_t lastRecoveryAttemptMs = 0;
+    int failCount = 0;
+    size_t lastGoodAircraftCount = 0;
+    uint32_t lastLoggedPollInterval = 0;
     for (;;) {
         const bool conn = (WiFi.status() == WL_CONNECTED);
         if (g_firmwareUpdateInProgress) {
@@ -177,14 +253,27 @@ static void adsb_task(void*) {
             // it refreshing even while the user taps around — a slow route/photo lookup (below)
             // can block this single network task, so it must never get ahead of the feed.
             const uint32_t nowMs = millis();
-            const uint32_t pollInterval = g_onBattery ? POLL_INTERVAL_BATTERY_MS : POLL_INTERVAL_MS;
+            const uint32_t pollInterval = adsb_poll_interval_for_count(lastGoodAircraftCount);
+            if (pollInterval != lastLoggedPollInterval) {
+                lastLoggedPollInterval = pollInterval;
+                Serial.printf("[adsb] poll interval now %lu ms (last good aircraft=%u)\n",
+                              (unsigned long)pollInterval, (unsigned)lastGoodAircraftCount);
+            }
             if (lastPoll == 0 || nowMs - lastPoll >= pollInterval) {  // aircraft feed
                 lastPoll = nowMs;
-                static int failCount = 0;
                 // poll() flips to the alternate host on failure, so consecutive polls already
                 // alternate hosts; a single transient miss is absorbed by the failCount window.
                 if (g_adsb.poll(fresh)) {
                     Serial.printf("[adsb] fetched %u aircraft\n", (unsigned)fresh.size());
+                    lastGoodAircraftCount = fresh.size();
+                    static size_t lastHeapLoggedCount = 0;
+                    if ((size_t)fresh.size() >= 12 && (size_t)fresh.size() != lastHeapLoggedCount) {
+                        lastHeapLoggedCount = fresh.size();
+                        Serial.printf("[adsb] heap after %u aircraft: free=%u largest_internal=%u\n",
+                                      (unsigned)fresh.size(),
+                                      (unsigned)ESP.getFreeHeap(),
+                                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+                    }
                     failCount = 0;
                     g_feedOk = true;
                     lastFeedOk = nowMs;
@@ -199,15 +288,25 @@ static void adsb_task(void*) {
                         const uint32_t remainMs = g_adsb.cooldownRemainingMs();
                         Serial.printf("[adsb] cooldown active (%lus remaining)\n",
                                       (unsigned long)((remainMs + 999UL) / 1000UL));
+                        adsb_note_feed_failure(g_adsb.lastFailureKind(), nowMs, failCount, lastFeedOk,
+                                               lastRecoveryAttemptMs);
                     } else {
                         Serial.println("[adsb] poll failed");
-                        if (++failCount >= 5) g_feedOk = false;   // sustained outage -> HUD warning
+                        Serial.printf("[adsb] heap on failure: free=%u largest_internal=%u\n",
+                                      (unsigned)ESP.getFreeHeap(),
+                                      (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL));
+                        adsb_note_feed_failure(g_adsb.lastFailureKind(), nowMs, failCount, lastFeedOk,
+                                               lastRecoveryAttemptMs);
                     }
                 }
             }
             // Then the on-demand lookups for the selected aircraft. Their timeouts are kept
             // short (see photo_client / route_client) so a slow photo server can't freeze the
             // feed for long; the next loop iteration polls again as soon as they return.
+            if (failCount > 0) {
+                vTaskDelay(pdMS_TO_TICKS(250));
+                continue;
+            }
             char wantHex[12], wantCall[12];
             float wantLat = 0.0f, wantLon = 0.0f, wantTrack = 0.0f / 0.0f;
             if (route_pending(wantHex, sizeof(wantHex), wantCall, sizeof(wantCall), &wantLat, &wantLon, &wantTrack)) {
@@ -265,12 +364,14 @@ static void loadSettings() {
     g_useGps           = p.getBool("usegps", false);
     g_trailLen         = p.getInt("traillen", 2);
     g_trackingFontSize = constrain(p.getInt("trackfont", 0), 0, 2);
+    g_liveAircraftCap  = constrain(p.getInt("livecap", ADSB_LIVE_AIRCRAFT_CAP), 5, 30);
     g_idleDimMs        = p.getUInt("idledim", IDLE_DIM_MS);
     g_units            = p.getInt("units", 0);
     g_prefetchDetails  = p.getBool("prefetch", true);
     g_genericPhotos    = p.getBool("genericpic", true);
     g_tz               = p.getString("tz", TZ_STR);
     p.end();
+    g_adsb.setLiveAircraftCap((size_t)g_liveAircraftCap);
 
     Preferences appp;
     appp.begin("cr_app", true);
@@ -328,9 +429,11 @@ static void checkAudioEvents() {
     static bool first = true;
     static uint32_t lastNew = 0;
     std::set<std::string> now, nowProx;
+    size_t inRangeCount = 0;
     for (const Aircraft &ac : g_snap) {
         const double d = geo::haversineKm(g_settings.homeLat, g_settings.homeLon, ac.lat, ac.lon);
         if (d > g_settings.rangeKm) continue;                 // in-range only
+        ++inRangeCount;
         const std::string hex = ac.hex.c_str();
         now.insert(hex);
         const bool isNew     = !first && !seen.count(hex);
@@ -344,7 +447,10 @@ static void checkAudioEvents() {
 
         // new-in-range pings (on entry), gated by the alert mode
         if (isNew) {
-            if (g_prefetchDetails) {
+            const bool allowPrefetch = g_prefetchDetails &&
+                                       inRangeCount <= PREFETCH_BUSY_AIRCRAFT_LIMIT &&
+                                       g_prefetching.size() < PREFETCH_QUEUE_LIMIT;
+            if (allowPrefetch) {
                 if (ac.flight.length()) route_prefetch(ac.hex.c_str(), ac.flight.c_str(), (float)ac.lat, (float)ac.lon, ac.track);
                 photo_prefetch(ac.hex.c_str(), ac.type.c_str());
                 bool tracked = false;
@@ -355,6 +461,10 @@ static void checkAudioEvents() {
                 if (!tracked) g_prefetching.push_back({hex, ac.flight.c_str(), millis()});
                 radar::setPrefetching(ac.hex.c_str(), true);
                 Serial.printf("[prefetch] queued %s / %s\n", ac.flight.c_str(), ac.hex.c_str());
+            } else if (g_prefetchDetails) {
+                Serial.printf("[prefetch] skipped %s / %s (in-range=%u queued=%u)\n",
+                              ac.flight.c_str(), ac.hex.c_str(),
+                              (unsigned)inRangeCount, (unsigned)g_prefetching.size());
             }
             if (canAudio && emergency) { if (g_alertMode >= 1) audio_play(AUDIO_ALERT); }   // emergencies only / +new
             else if (canAudio && g_alertMode >= 2 && millis() - lastNew > 3000) {
@@ -399,7 +509,7 @@ static void onRangeChange(float km) {
     p.begin("capsuleradar", false);
     p.putFloat("rangeKm", km);
     p.end();
-    g_requeryKm = constrain(km * 1.6f, 50.0f, 200.0f);
+    g_requeryKm = adsb_query_radius_for_display(km);
     g_requery = true;
     radar::update(g_snap, g_settings);   // instant visual zoom from the last snapshot
     ui_set_range_km(km);
@@ -525,6 +635,13 @@ static void handleRoot() {
         snprintf(o, sizeof(o), "<option value=%d%s>%s</option>", i, i == g_trackingFontSize ? " selected" : "", tfnames[i]);
         tfopts += o;
     }
+    String liveCapOpts;
+    for (int cap = 5; cap <= 30; cap += 5) {
+        char o[72];
+        snprintf(o, sizeof(o), "<option value=%d%s>%d aircraft</option>",
+                 cap, cap == g_liveAircraftCap ? " selected" : "", cap);
+        liveCapOpts += o;
+    }
     const char *anames[] = {"Off", "Emergencies only", "New aircraft + emergencies"};
     String aopts;
     for (int i = 0; i < 3; ++i) {
@@ -608,6 +725,7 @@ static void handleRoot() {
         "<label>Center longitude</label><input id=lon name=lon value='%.5f'>"
         "%s"
         "<label>Display range</label><select name=range>%s</select>"
+        "<label>Max tracked aircraft</label><select name=livecap>%s</select>"
         "<label>Theme</label><select name=theme>%s</select>"
         "<label>Time zone</label><select name=tz>%s</select>"
         "<label><input id=mapbg type=checkbox class=ck name=mapbg value=1 %s>Display background map</label>"
@@ -704,7 +822,7 @@ static void handleRoot() {
         "for(i=0;i<e.options.length;i++){if(+e.options[i].dataset.off===o&&+e.options[i].dataset.dst===s){b=i;break;}}"
         "if(b<0)for(i=0;i<e.options.length;i++){if(+e.options[i].dataset.off===o){b=i;break;}}"
         "if(b>=0)e.selectedIndex=b;})();</script></body></html>",
-        g_settings.homeLat, g_settings.homeLon, gpsRow.c_str(), ropts.c_str(), topts.c_str(),
+        g_settings.homeLat, g_settings.homeLon, gpsRow.c_str(), ropts.c_str(), liveCapOpts.c_str(), topts.c_str(),
         tzopts.c_str(),
         g_showMapBackground ? "checked" : "",
         g_brightnessDay, iopts.c_str(),
@@ -736,6 +854,7 @@ static void handleSave() {
         if (lon >= -180.0 && lon <= 180.0) p.putDouble("homeLon", lon);
     }
     if (g_web.hasArg("range")) p.putFloat("rangeKm", g_web.arg("range").toFloat());
+    if (g_web.hasArg("livecap")) p.putInt("livecap", constrain(g_web.arg("livecap").toInt(), 5, 30));
     if (g_web.hasArg("theme")) p.putInt("theme", g_web.arg("theme").toInt());
     p.putBool("mapbg", g_web.hasArg("mapbg"));
     if (g_web.hasArg("tz")) {
@@ -1845,7 +1964,7 @@ static void setupFirmwareUpdateMode() {
     }
     if (WiFi.status() == WL_CONNECTED) {
         Serial.printf("[update] WiFi up, IP %s\n", WiFi.localIP().toString().c_str());
-        MDNS.begin("capsuleradar");
+        g_mdnsUp = MDNS.begin("capsuleradar");
     } else {
         Serial.println("[update] WiFi not connected; updater page will still start if network recovers");
     }
@@ -1976,9 +2095,7 @@ void setup() {
     // ArduinoOTA is started from loop() once WiFi connects (see otaUp there).
 
     // --- ADS-B client + task ----------------------------------------------
-    float queryKm = g_settings.rangeKm * 1.6f;          // query wider than the display range
-    if (queryKm < 50.0f)  queryKm = 50.0f;
-    if (queryKm > 200.0f) queryKm = 200.0f;
+    float queryKm = adsb_query_radius_for_display(g_settings.rangeKm);
     g_adsb.begin(g_settings.homeLat, g_settings.homeLon, queryKm);
     g_ac_mutex = xSemaphoreCreateMutex();
     xTaskCreatePinnedToCore(adsb_task, "adsb", 16384, nullptr, 1, nullptr, 0);  // TLS needs a big stack
@@ -2104,16 +2221,16 @@ void loop() {
     if (g_launchAlternateFirmware) { g_launchAlternateFirmware = false; Serial.println("[app] rebooting into alternate firmware slot"); delay(800); ESP.restart(); }
 
     // OTA: set up once WiFi is up, then service it every loop (flash over the air)
-    static bool otaUp = false;
-    if (!otaUp && WiFi.status() == WL_CONNECTED) {
+    if (!g_otaUp && WiFi.status() == WL_CONNECTED) {
         exportSharedWifiCredentials();
+        if (!g_mdnsUp) g_mdnsUp = MDNS.begin("capsuleradar");
         ArduinoOTA.setHostname("capsuleradar");        // -> capsuleradar.local (registers mDNS)
         ArduinoOTA.begin();
-        MDNS.addService("http", "tcp", 80);            // advertise the config web page
-        otaUp = true;
+        if (g_mdnsUp) MDNS.addService("http", "tcp", 80);            // advertise the config web page
+        g_otaUp = true;
         Serial.println("[ota] ready: pio run -e esp32-s3-amoled-175-ota -t upload");
     }
-    if (otaUp) ArduinoOTA.handle();
+    if (g_otaUp) ArduinoOTA.handle();
 
     // Push a fresh ADS-B snapshot to the radar (copy under the mutex, render outside).
     if (g_appMode == 0 && g_acDirty) {
@@ -2195,7 +2312,7 @@ void loop() {
                 g_settings.homeLat = glat; g_settings.homeLon = glon;   // radar/coastline recenter
                 // re-query the new area — set the radius too (same formula as boot/zoom), or
                 // adsb_task would re-begin with a stale/zero g_requeryKm and fetch 0 aircraft.
-                g_requeryKm = constrain(g_settings.rangeKm * 1.6f, 50.0f, 200.0f);
+                g_requeryKm = adsb_query_radius_for_display(g_settings.rangeKm);
                 g_requery = true;                                       // adsb_task re-queries the new area
                 Serial.printf("[gps] re-centred to %.4f, %.4f\n", glat, glon);
             }

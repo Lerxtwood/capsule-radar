@@ -40,6 +40,7 @@ static const float RANGE_STEPS_KM[] = {9.26f, 20.372f, 29.632f, 50.004f, 100.008
 #define ADSB_USER_AGENT     "CapsuleRadar/1.0 (ESP32-S3 hobby; +https://github.com/socquique/capsule-radar)"
 #define ADSB_HTTPS_INSECURE 1               // 1 = setInsecure() (hobby). 0 = use pinned root CA.
 #define ADSB_MAX_AIRCRAFT   60              // hard cap parsed per poll (protect RAM in busy areas)
+#define ADSB_LIVE_AIRCRAFT_CAP 20           // keep only the nearest contacts live; adaptive poll timing backs off as scenes get busier
 
 // ---------- Debug ----------
 #define DEBUG_MEM           0               // 1 = print a [mem] heap/fps line every 5s on serial
