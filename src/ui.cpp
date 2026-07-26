@@ -297,17 +297,10 @@ static void (*s_firmwareSwitchCb)(void) = nullptr;
 static lv_obj_t *s_zoomBtn = nullptr, *s_zoomLbl = nullptr;
 static lv_obj_t *s_zoomFlashLeft = nullptr, *s_zoomFlashRight = nullptr;
 static lv_obj_t *s_tamaBtn = nullptr, *s_tamaLbl = nullptr, *s_printerBtn = nullptr, *s_printerLbl = nullptr;
-static constexpr lv_coord_t RANGE_TOUCH_STRIP_PX = 10;   // require a touch in the very bottom strip
+static constexpr lv_coord_t ZOOM_TOUCH_PAD_X = 26;
+static constexpr lv_coord_t ZOOM_TOUCH_PAD_Y = 16;
 enum ZoomTapSide : uint8_t { ZOOM_TAP_NONE = 0, ZOOM_TAP_LEFT, ZOOM_TAP_RIGHT };
 static ZoomTapSide s_zoomTapSide = ZOOM_TAP_NONE;
-
-static bool range_touch_active() {
-    lv_indev_t *indev = lv_indev_get_act();
-    if (!indev) return false;
-    lv_point_t p;
-    lv_indev_get_point(indev, &p);
-    return p.y >= SCREEN_H - RANGE_TOUCH_STRIP_PX;
-}
 
 static ZoomTapSide zoom_touch_side() {
     lv_indev_t *indev = lv_indev_get_act();
@@ -315,8 +308,11 @@ static ZoomTapSide zoom_touch_side() {
     lv_point_t p;
     lv_area_t a;
     lv_indev_get_point(indev, &p);
-    if (p.y < SCREEN_H - RANGE_TOUCH_STRIP_PX) return ZOOM_TAP_NONE;
     lv_obj_get_coords(s_zoomBtn, &a);
+    a.x1 -= ZOOM_TOUCH_PAD_X;
+    a.x2 += ZOOM_TOUCH_PAD_X;
+    a.y1 -= ZOOM_TOUCH_PAD_Y;
+    a.y2 += ZOOM_TOUCH_PAD_Y;
     if (p.x < a.x1 || p.x > a.x2 || p.y < a.y1 || p.y > a.y2) return ZOOM_TAP_NONE;
     const lv_coord_t mid = a.x1 + (lv_area_get_width(&a) / 2);
     return (p.x < mid) ? ZOOM_TAP_LEFT : ZOOM_TAP_RIGHT;
@@ -889,10 +885,11 @@ void ui_create(void) {
     build_card();
 
     // on-screen range/zoom button. Keep the touch target tight and low so taps on
-    // nearby aircraft don't accidentally change range.
+    // nearby aircraft don't accidentally change range, but allow some slack around
+    // the button so left/right taps are easier to hit.
     s_zoomBtn = lv_btn_create(s_tileRadar);
     lv_obj_set_size(s_zoomBtn, 118, 24);
-    lv_obj_set_ext_click_area(s_zoomBtn, 0);
+    lv_obj_set_ext_click_area(s_zoomBtn, 14);
     lv_obj_align(s_zoomBtn, LV_ALIGN_BOTTOM_MID, 0, -4);
     lv_obj_set_style_radius(s_zoomBtn, 12, 0);
     lv_obj_set_style_bg_color(s_zoomBtn, UI_PANEL, 0);
