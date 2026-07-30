@@ -9,6 +9,7 @@
 enum AudioCue {
     AUDIO_NEW          = 0,   // new aircraft entered range (soft single beep)
     AUDIO_ALERT        = 1,   // emergency / military contact (urgent double beep)
+    AUDIO_PREFETCH     = 2,   // prefetched aircraft details are ready to show
     AUDIO_TAMA_TAP     = 10,
     AUDIO_TAMA_EAT,
     AUDIO_TAMA_PLAY,

@@ -24,6 +24,7 @@ static volatile int  s_vol = 60;     // 0..100
 static volatile bool s_muted = false;
 static volatile int  s_cue = -1;
 static SemaphoreHandle_t s_sem = nullptr;
+static constexpr int AUDIO_SELFTEST_CUE = 99;
 
 static void es_write(uint8_t reg, uint8_t val) {
     Wire.beginTransmission(ES8311_ADDR);
@@ -163,7 +164,7 @@ static void play_cue(int cue) {
     digitalWrite(PIN_AUDIO_PA, HIGH);              // enable speaker amp
     delay(8);                                      // let the amp power up
     size_t bw;
-    if (cue == 2) {                                // self-test: ~2 s continuous tone, PA held
+    if (cue == AUDIO_SELFTEST_CUE) {               // self-test: ~2 s continuous tone, PA held
         size_t ns = gen_beep(buf, S_BUF_LEN, 1000.0f, 480, amp);
         for (int k = 0; k < 4; ++k) i2s_write(I2S_PORT, buf, ns * 2, &bw, portMAX_DELAY);
     } else if (cue == AUDIO_ALERT) {
@@ -174,6 +175,12 @@ static void play_cue(int cue) {
         }
     } else if (cue == AUDIO_NEW) {
         size_t ns = gen_beep(buf, S_BUF_LEN, 880.0f, 160, amp);
+        i2s_write(I2S_PORT, buf, ns * 2, &bw, portMAX_DELAY);
+    } else if (cue == AUDIO_PREFETCH) {
+        size_t ns = gen_beep(buf, S_BUF_LEN, 880.0f, 70, amp * 0.88f);
+        i2s_write(I2S_PORT, buf, ns * 2, &bw, portMAX_DELAY);
+        delay(20);
+        ns = gen_beep(buf, S_BUF_LEN, 1047.0f, 105, amp * 0.82f);
         i2s_write(I2S_PORT, buf, ns * 2, &bw, portMAX_DELAY);
     } else if (cue == AUDIO_TAMA_TAP) {
         write_tone(1320.0f, 35, 0.45f);
@@ -253,6 +260,6 @@ void audio_play(AudioCue cue) {
 
 void audio_selftest() {   // ~2 s continuous tone, ignores mute, PA held on
     if (!s_ok) return;
-    s_cue = 2;
+    s_cue = AUDIO_SELFTEST_CUE;
     if (s_sem) xSemaphoreGive(s_sem);
 }

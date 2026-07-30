@@ -51,9 +51,13 @@ static WiFiManager           g_wm;
 static int                   g_brightnessDay = BRIGHTNESS_DEFAULT;   // user brightness (web/NVS)
 static int                   g_volume = 60;                          // alert volume 0..100 (web/NVS)
 static bool                  g_muted  = false;                       // mute alert pings
-static bool                  g_quietHours = false;                   // mute radar sounds between quiet start/end
+static bool                  g_quietHours = false;                   // base quiet-hours window enabled
 static int                   g_quietStartMin = 22 * 60;              // minutes after midnight, local time
 static int                   g_quietEndMin = 8 * 60;                 // minutes after midnight, local time
+static bool                  g_quietMuteAudio = true;                // suppress radar sounds during quiet hours
+static bool                  g_quietScreenOff = false;               // turn the device screen off during quiet hours
+static bool                  g_quietScreenOffActive = false;         // cached live quiet-hours screen-off state
+static uint32_t              g_quietTouchWakeUntilMs = 0;            // touch temporarily wakes the screen in quiet hours
 static int                   g_alertMode = 2;                        // 0=off 1=emergencies 2=new+emergencies (web/NVS)
 static float                 g_proximityKm = 0.0f;                   // proximity alert radius, km (0=off) (web/NVS)
 static uint32_t              g_idleDimMs = IDLE_DIM_MS;              // dim after this idle time (0 = never)
@@ -359,6 +363,8 @@ static void loadSettings() {
     g_quietHours       = p.getBool("quiet", false);
     g_quietStartMin    = constrain(p.getInt("qstart", 22 * 60), 0, 1439);
     g_quietEndMin      = constrain(p.getInt("qend", 8 * 60), 0, 1439);
+    g_quietMuteAudio   = p.getBool("qaudio", true);
+    g_quietScreenOff   = p.getBool("qscreen", false);
     g_alertMode        = p.getInt("alertmode", 2);
     g_proximityKm      = p.getFloat("proxkm", 0.0f);
     g_useGps           = p.getBool("usegps", false);
@@ -406,6 +412,10 @@ static int parseTimeToMinutes(const String &value, int fallback) {
     return hh * 60 + mm;
 }
 
+static bool quietHoursTouchWakeActiveNow() {
+    return g_quietTouchWakeUntilMs != 0 && (int32_t)(g_quietTouchWakeUntilMs - millis()) > 0;
+}
+
 static bool quietHoursActiveNow() {
     if (!g_quietHours || g_quietStartMin == g_quietEndMin) return false;
     struct tm ti;
@@ -418,7 +428,8 @@ static bool quietHoursActiveNow() {
 }
 
 static bool radarSoundAllowed() {
-    return audio_present() && !g_muted && !quietHoursActiveNow() && g_volume > 0;
+    const bool quietAudioBlocked = g_quietHours && g_quietMuteAudio && quietHoursActiveNow();
+    return audio_present() && !g_muted && !quietAudioBlocked && g_volume > 0;
 }
 
 // Audio alerts. g_alertMode: 0 = off, 1 = emergencies only, 2 = new aircraft + emergencies.
@@ -493,7 +504,15 @@ static void updatePrefetchIndicators() {
         const bool completed = (routeDone && photoDone) && elapsed >= 1500UL;
         if (completed || timedOut) {
             radar::setPrefetching(g_prefetching[i].hex.c_str(), false);
-            if (completed) ui_preview_aircraft(g_prefetching[i].hex.c_str(), 5000);
+            if (completed) {
+                Serial.printf("[prefetch] ready -> preview %s (audio=%d muted=%d quiet=%d vol=%d)\n",
+                              g_prefetching[i].hex.c_str(),
+                              audio_present() ? 1 : 0, g_muted ? 1 : 0,
+                              (g_quietHours && g_quietMuteAudio && quietHoursActiveNow()) ? 1 : 0,
+                              g_volume);
+                if (radarSoundAllowed()) audio_play(AUDIO_PREFETCH);
+                ui_preview_aircraft(g_prefetching[i].hex.c_str(), 5000);
+            }
             g_prefetching.erase(g_prefetching.begin() + i);
         } else ++i;
     }
@@ -559,12 +578,13 @@ static void rtc_seed_clock() {
     Serial.println("[rtc] system clock seeded from RTC");
 }
 
-// Brightness combines idle auto-dim and face-down sleep (sleep wins -> screen off).
+// Brightness combines idle auto-dim, quiet-hours screen-off, and face-down sleep.
 static bool g_asleep = false;   // face-down
 static bool g_idle   = false;   // no touch for a while
 static void applyBrightness() {
     int b = g_brightnessDay;
     if (g_idle  && BRIGHTNESS_IDLE  < b) b = BRIGHTNESS_IDLE;   // idle only dims down
+    if (g_quietScreenOffActive && !quietHoursTouchWakeActiveNow()) b = 0;  // temporary tap wake overrides quiet-hours blanking
     if (g_asleep) b = 0;                                         // face-down -> screen off
     display::setBrightness(b);
 }
@@ -749,15 +769,18 @@ static void handleRoot() {
         "<label>Screen rotation (USB-C position)</label><select onchange='ro(this.value)'>%s</select>"
         "<label>Rotation offset (degrees)</label><input type=number min=-45 max=45 step=1 value='%d' onchange='rf(this.value)'>"
         "<label>Units</label><select onchange='u(this.value)'>%s</select></div>"
+        "<div class=card><div class=t>Quiet Hours</div>"
+        "<label><input id=quiet type=checkbox class=ck %s onchange='qh()'>Enable quiet hours</label>"
+        "<div style='display:grid;grid-template-columns:1fr 1fr;gap:8px'>"
+        "<div><label>Quiet start</label><input id=qs type=time value='%s' onchange='qh()'></div>"
+        "<div><label>Quiet end</label><input id=qe type=time value='%s' onchange='qh()'></div></div>"
+        "<label><input id=qaudio type=checkbox class=ck %s onchange='qh()'>Mute notification sounds during quiet hours</label>"
+        "<label><input id=qscreen type=checkbox class=ck %s onchange='qh()'>Turn the screen off during quiet hours</label>"
+        "<p style='color:#6f8c7d;font-size:12px;margin:6px 0 0'>Uses the device's local time zone and supports overnight ranges.</p></div>"
         "<div class=card><div class=t>Sound</div>"
         "<label>Volume</label>"
         "<input type=range min=0 max=100 value='%d' oninput='v(this.value,0)' onchange='v(this.value,1)'>"
         "<label><input type=checkbox class=ck %s onchange='m(this.checked)'>Mute alerts</label>"
-        "<label><input id=quiet type=checkbox class=ck %s onchange='qh()'>Quiet hours</label>"
-        "<div style='display:grid;grid-template-columns:1fr 1fr;gap:8px'>"
-        "<div><label>Quiet start</label><input id=qs type=time value='%s' onchange='qh()'></div>"
-        "<div><label>Quiet end</label><input id=qe type=time value='%s' onchange='qh()'></div></div>"
-        "<p style='color:#6f8c7d;font-size:12px;margin:6px 0 0'>Mutes radar beeps during this local-time window, including overnight ranges.</p>"
         "<label>Alert on</label><select onchange='al(this.value)'>%s</select>"
         "<label>Proximity alert</label><select onchange='px(this.value)'>%s</select>"
         "<button type=button class=sec onclick='t()'>Test ping</button></div>"
@@ -788,7 +811,7 @@ static void handleRoot() {
         "function b(v,s){fetch('/bright?v='+v+(s?'&save=1':''))}"
         "function v(x,s){fetch('/vol?v='+x+(s?'&save=1':''))}"
         "function m(c){fetch('/vol?mute='+(c?1:0)+'&save=1')}"
-        "function qh(){fetch('/vol?quiet='+(document.getElementById('quiet').checked?1:0)+'&qstart='+document.getElementById('qs').value+'&qend='+document.getElementById('qe').value+'&save=1')}"
+        "function qh(){fetch('/quiet?quiet='+(document.getElementById('quiet').checked?1:0)+'&qstart='+document.getElementById('qs').value+'&qend='+document.getElementById('qe').value+'&qaudio='+(document.getElementById('qaudio').checked?1:0)+'&qscreen='+(document.getElementById('qscreen').checked?1:0)+'&save=1')}"
         "function t(){fetch('/vol?test=1')}"
         "function d(v){fetch('/idle?v='+v+'&save=1')}"
         "function sw(c){fetch('/sweep?v='+(c?1:0)+'&save=1')}"
@@ -849,8 +872,9 @@ static void handleRoot() {
         g_genericPhotos ? "checked" : "",
         g_showAirports ? "checked" : "",
         tlopts.c_str(), tfopts.c_str(), rotopts.c_str(), g_rotationOffset, uopts.c_str(),
-        g_volume, g_muted ? "checked" : "", g_quietHours ? "checked" : "",
-        quietStart, quietEnd, aopts.c_str(), popts.c_str(),
+        g_quietHours ? "checked" : "", quietStart, quietEnd,
+        g_quietMuteAudio ? "checked" : "", g_quietScreenOff ? "checked" : "",
+        g_volume, g_muted ? "checked" : "", aopts.c_str(), popts.c_str(),
         g_settings.homeLat, g_settings.homeLon,
         g_showMapBackground ? 1 : 0, g_settings.homeLat, g_settings.homeLon,
         (g_tz == TZ_STR ? 0 : 1));
@@ -914,22 +938,38 @@ static void handleBright() {
 static void handleVol() {
     if (g_web.hasArg("v"))    { g_volume = constrain((int)g_web.arg("v").toInt(), 0, 100); audio_set_volume(g_volume); }
     if (g_web.hasArg("mute")) { g_muted = g_web.arg("mute").toInt() != 0; audio_set_muted(g_muted); }
-    if (g_web.hasArg("quiet")) g_quietHours = g_web.arg("quiet").toInt() != 0;
-    if (g_web.hasArg("qstart")) g_quietStartMin = parseTimeToMinutes(g_web.arg("qstart"), g_quietStartMin);
-    if (g_web.hasArg("qend"))   g_quietEndMin   = parseTimeToMinutes(g_web.arg("qend"), g_quietEndMin);
     if (g_web.hasArg("save")) {
         Preferences p;
         p.begin("capsuleradar", false);
         p.putInt("vol", g_volume);
         p.putBool("mute", g_muted);
-        p.putBool("quiet", g_quietHours);
-        p.putInt("qstart", g_quietStartMin);
-        p.putInt("qend", g_quietEndMin);
         p.end();
     }
     if (g_web.hasArg("test")) {
         if (g_web.arg("test").toInt() == 2) audio_selftest();   // long tone, ignores mute
         else if (radarSoundAllowed()) audio_play(AUDIO_NEW);
+    }
+    g_web.send(200, "text/plain", "ok");
+}
+
+static void handleQuiet() {
+    if (g_web.hasArg("quiet"))  g_quietHours = g_web.arg("quiet").toInt() != 0;
+    if (g_web.hasArg("qstart")) g_quietStartMin = parseTimeToMinutes(g_web.arg("qstart"), g_quietStartMin);
+    if (g_web.hasArg("qend"))   g_quietEndMin   = parseTimeToMinutes(g_web.arg("qend"), g_quietEndMin);
+    if (g_web.hasArg("qaudio")) g_quietMuteAudio = g_web.arg("qaudio").toInt() != 0;
+    if (g_web.hasArg("qscreen")) g_quietScreenOff = g_web.arg("qscreen").toInt() != 0;
+    if (!g_quietHours || !g_quietScreenOff || !quietHoursActiveNow()) g_quietTouchWakeUntilMs = 0;
+    g_quietScreenOffActive = g_quietHours && g_quietScreenOff && quietHoursActiveNow();
+    applyBrightness();
+    if (g_web.hasArg("save")) {
+        Preferences p;
+        p.begin("capsuleradar", false);
+        p.putBool("quiet", g_quietHours);
+        p.putInt("qstart", g_quietStartMin);
+        p.putInt("qend", g_quietEndMin);
+        p.putBool("qaudio", g_quietMuteAudio);
+        p.putBool("qscreen", g_quietScreenOff);
+        p.end();
     }
     g_web.send(200, "text/plain", "ok");
 }
@@ -2126,6 +2166,7 @@ void setup() {
     g_web.on("/wifi", HTTP_POST, handleWifi);
     g_web.on("/bright", handleBright);
     g_web.on("/vol", handleVol);
+    g_web.on("/quiet", handleQuiet);
     g_web.on("/alerts", handleAlerts);
     g_web.on("/idle", handleIdle);
     g_web.on("/sweep", handleSweep);
@@ -2342,18 +2383,35 @@ void loop() {
     // face-down -> screen off (IMU); flip face-up to wake
     static uint32_t lastImu = 0;
     static int fdCount = 0;
+    static uint32_t lastInactiveMs = 0;
+    static bool lastQuietTouchWakeActive = false;
     if (g_appMode == 0 && millis() - lastImu > 400) {
         lastImu = millis();
         const int fd = imu_facedown();              // 1 down, 0 not, -1 read error
         if (fd > 0)       { if (fdCount < 8) fdCount++; }
         else if (fd == 0) fdCount = 0;              // -1 (I2C hiccup): leave the counter as-is
         const bool sleep = (fdCount >= 4);   // ~1.6 s face-down
-        const bool idle  = g_idleDimMs > 0 && display::inactiveMs() > g_idleDimMs;
-        if (sleep != g_asleep || idle != g_idle) {
+        const uint32_t inactiveMs = display::inactiveMs();
+        const bool sawTouch = inactiveMs < lastInactiveMs;
+        const bool quietScreen = g_quietHours && g_quietScreenOff && quietHoursActiveNow();
+        if (quietScreen && g_quietScreenOffActive && sawTouch) {
+            g_quietTouchWakeUntilMs = millis() + 30000UL;
+        } else if (!quietScreen || !quietHoursTouchWakeActiveNow()) {
+            g_quietTouchWakeUntilMs = 0;
+        }
+        const bool idle  = g_idleDimMs > 0 && inactiveMs > g_idleDimMs;
+        if (sleep != g_asleep || idle != g_idle || quietScreen != g_quietScreenOffActive) {
             g_asleep = sleep;
             g_idle = idle;
+            g_quietScreenOffActive = quietScreen;
             applyBrightness();
         }
+        const bool quietTouchWakeActive = quietHoursTouchWakeActiveNow();
+        if (quietScreen && quietTouchWakeActive != lastQuietTouchWakeActive) {
+            applyBrightness();
+        }
+        lastQuietTouchWakeActive = quietTouchWakeActive;
+        lastInactiveMs = inactiveMs;
     }
 
     delay(5);
